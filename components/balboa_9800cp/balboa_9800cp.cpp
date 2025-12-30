@@ -25,6 +25,7 @@ void Balboa9800CP::set_pins(GPIOPin *clk, GPIOPin *data, GPIOPin *ctrl_in, GPIOP
 }
 
 void Balboa9800CP::setup() {
+  ESP_LOGW(TAG, "BALBOA COMPONENT setup() reached");
   instance_ = this;
 
   this->clk_->setup();
