@@ -62,7 +62,7 @@ void Balboa9800CP::setup() {
 
   // Ensure clock pin is input and attach interrupt on raw GPIO
   pinMode(this->clk_gpio_, INPUT);
-  attachInterrupt(digitalPinToInterrupt(this->clk_gpio_), Balboa9800CP::isr_router_, RISING);
+  attachInterrupt(digitalPinToInterrupt(this->clk_gpio_), Balboa9800CP::isr_router_, CHANGE);
 
   // SAFE resistor-only injection: start ctrl_out as high-Z (INPUT)
   pinMode(this->ctrl_out_gpio_, INPUT);
