@@ -167,15 +167,17 @@ void Balboa9800CP::queue_command(uint8_t cmd) {
 }
 
 void Balboa9800CP::loop() {
-  static uint32_t last_ms = 0;
+  // 1 Hz ISR activity log
+  static uint32_t last_edges_ms = 0;
   const uint32_t now = millis();
-  if (now - last_ms >= 1000) {
-    last_ms = now;
+  if (now - last_edges_ms >= 1000) {
+    last_edges_ms = now;
     const uint32_t edges = this->isr_edge_count_;
     this->isr_edge_count_ = 0;
     ESP_LOGD(TAG, "clk edges/sec=%u bit_index=%d", (unsigned) edges, this->bit_index_);
   }
 
+  // Consume completed frames
   bool ready = false;
   portENTER_CRITICAL(&balboa_mux);
   ready = this->frame_ready_;
@@ -184,6 +186,12 @@ void Balboa9800CP::loop() {
 
   if (!ready) return;
 
+  // ---- RAW OUTPUT FIX: print at most once per second ----
+  static uint32_t last_raw_ms = 0;
+  if (now - last_raw_ms < 1000) return;
+  last_raw_ms = now;
+
+  // Copy bits then print
   uint8_t local_bits[76];
   portENTER_CRITICAL(&balboa_mux);
   for (int i = 0; i < 76; i++) local_bits[i] = this->bits_[i];
