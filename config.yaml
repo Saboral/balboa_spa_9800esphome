@@ -1,7 +1,10 @@
 esphome:
-  name: spa_9800cp
-  platform: ESP8266
-  board: nodemcuv2
+  name: spa_9800cp_esp32
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
 
 logger:
   level: WARN
@@ -15,25 +18,32 @@ ota:
 
 external_components:
   - source:
-      type: git
-      url: https://github.com/Saboral/balboa_spa_9800esphome
+      type: local
+      path: ./esphome-balboa-9800cp
     components: [ balboa_9800cp ]
 
 balboa_9800cp:
   id: spa_bus
-  clk_pin: D1
-  data_pin: D2
-  ctrl_in_pin: D3
-  ctrl_out_pin: D4
-  frame_bits: 76
+  clk_pin: 18
+  data_pin: 19
+  ctrl_in_pin: 21
+  ctrl_out_pin: 22
   gap_us: 8000
   press_frames: 6
 
 sensor:
   - platform: balboa_9800cp
     balboa_id: spa_bus
-    water_temp:
+    water_temp_f:
       name: "Spa Water Temp"
+
+binary_sensor:
+  - platform: balboa_9800cp
+    balboa_id: spa_bus
+    heating:
+      name: "Spa Heating"
+    standard_mode:
+      name: "Spa Standard Mode"
 
 button:
   - platform: balboa_9800cp
