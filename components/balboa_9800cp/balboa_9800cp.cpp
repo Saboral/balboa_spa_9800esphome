@@ -65,7 +65,9 @@ void Balboa9800CP::setup() {
 }
 
 void IRAM_ATTR Balboa9800CP::isr_router_() {
-  if (instance_ != nullptr) instance_->on_clock_edge_();
+  if (Balboa9800CP::instance_ != nullptr) {
+    Balboa9800CP::instance_->on_clock_edge_();
+  }
 }
 
 void IRAM_ATTR Balboa9800CP::on_clock_edge_() {
