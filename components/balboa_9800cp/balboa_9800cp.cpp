@@ -1,7 +1,6 @@
 #include "balboa_9800cp.h"
 #include "esphome/core/log.h"
 
-#include <Arduino.h>
 #include <ctype.h>
 #include <string.h>
 
@@ -32,18 +31,19 @@ void Balboa9800CP::setup() {
   this->ctrl_in_->setup();
   this->ctrl_out_->setup();
 
-  // Cache raw GPIO number for ctrl_out so we can implement safe open-drain/high-Z in ISR
-  this->ctrl_out_gpio_ = this->ctrl_out_->get_pin();
+  // Start HIGH-Z (INPUT) so we never accidentally "press" a button at boot.
+  // This is the safe resistor-only injection approach.
+  this->ctrl_out_->pin_mode(gpio::FLAG_INPUT);
 
-  // IMPORTANT: start HIGH-Z (INPUT) so we never accidentally drive the control line at boot
-  pinMode(this->ctrl_out_gpio_, INPUT);
+  // Ensure CLK pin mode is input (should already be via schema, but explicit is fine)
+  this->clk_->pin_mode(gpio::FLAG_INPUT);
 
-  const int clk_pin = this->clk_->get_pin();
-  pinMode(clk_pin, INPUT);
-  attachInterrupt(digitalPinToInterrupt(clk_pin), Balboa9800CP::isr_router_, RISING);
+  // Attach interrupt to CLK using the underlying ISR support in ESPHome GPIOPin.
+  // Many ESPHome versions attachInterrupt on the raw pin internally; GPIOPin provides attach_interrupt.
+  // If attach_interrupt isn't available in your build, we can fall back to a different method.
+  this->clk_->attach_interrupt(Balboa9800CP::isr_router_, gpio::INTERRUPT_RISING_EDGE);
 
-  ESP_LOGI(TAG, "Started (gap_us=%u press_frames=%u) ctrl_out_gpio=%d",
-           (unsigned) this->gap_us_, (unsigned) this->press_frames_, this->ctrl_out_gpio_);
+  ESP_LOGI(TAG, "Started (gap_us=%u press_frames=%u)", (unsigned) this->gap_us_, (unsigned) this->press_frames_);
 }
 
 void IRAM_ATTR Balboa9800CP::isr_router_() {
@@ -55,7 +55,6 @@ void IRAM_ATTR Balboa9800CP::on_clock_edge_() {
   const uint32_t dt = now - this->last_edge_us_;
   this->last_edge_us_ = now;
 
-  // Frame boundary (reset on long inter-frame gap)
   if (dt > this->gap_us_) this->bit_index_ = 0;
 
   const int i = this->bit_index_;
@@ -64,10 +63,10 @@ void IRAM_ATTR Balboa9800CP::on_clock_edge_() {
   // Capture DATA bit (board -> topside)
   this->bits_[i] = this->data_->digital_read() ? 1 : 0;
 
-  // Default CTRL pass-through (we only override last 4 bits during command frames)
+  // Default CTRL pass-through
   uint8_t out = this->ctrl_in_->digital_read() ? 1 : 0;
 
-  // Inject CTRL last 4 bits (i=72..75) with verified button codes:
+  // Inject last 4 bits (i = 72..75) with codes:
   // steady 0000, Up 1110, Down 1111, Mode 1000
   if ((this->frames_left_ > 0 || this->release_frame_) && i >= 72) {
     uint8_t pattern = 0b0000;
@@ -87,15 +86,14 @@ void IRAM_ATTR Balboa9800CP::on_clock_edge_() {
     out = (pattern >> (3 - bitpos)) & 0x1;  // MSB first
   }
 
-  // SAFE ESP32 control injection (resistor-only):
-  // open-drain/high-Z behavior:
-  // out=0 -> drive LOW (pull down)
-  // out=1 -> float (INPUT), let spa/topside pull HIGH
+  // SAFE open-drain/high-Z behavior using ESPHome GPIOPin (no raw get_pin()).
+  // out=0 -> actively pull LOW
+  // out=1 -> float (INPUT), letting spa/topside pull HIGH
   if (out == 0) {
-    pinMode(this->ctrl_out_gpio_, OUTPUT);
-    digitalWrite(this->ctrl_out_gpio_, LOW);
+    this->ctrl_out_->pin_mode(gpio::FLAG_OUTPUT);
+    this->ctrl_out_->digital_write(false);
   } else {
-    pinMode(this->ctrl_out_gpio_, INPUT);
+    this->ctrl_out_->pin_mode(gpio::FLAG_INPUT);
   }
 
   this->bit_index_++;
@@ -103,7 +101,6 @@ void IRAM_ATTR Balboa9800CP::on_clock_edge_() {
   if (this->bit_index_ >= 76) {
     this->frame_ready_ = true;
 
-    // Press bookkeeping: hold N frames, then one release frame
     if (this->frames_left_ > 0) {
       this->frames_left_--;
       if (this->frames_left_ == 0) this->release_frame_ = true;
@@ -120,19 +117,8 @@ void Balboa9800CP::queue_command(uint8_t cmd) {
   this->frames_left_ = this->press_frames_;
 }
 
-/* -------- decoder.js port (exact mapping) --------
-   inverted: bit 29
-   setHeat: bit 41
-   mode: bit 60 (0 Economy, 1 Standard)
-   heating: bit 40
-   tempUp: bit 30
-   tempDown: bit 39
-   blower: bit 43
-   pump: bit 49
-   jets: bit 50
-   light: bit 48
-   displayBits: dataString.substring(1,29)
-*/
+// decoder.js mapping helpers
+
 int Balboa9800CP::get_bit1_(int bit_1_index) const {
   if (bit_1_index < 1 || bit_1_index > 76) return 0;
   return this->bits_[bit_1_index - 1] ? 1 : 0;
@@ -188,7 +174,7 @@ void Balboa9800CP::decode_display_(char out[5], bool &inverted) const {
   inverted = (this->get_bit1_(29) == 1);
 
   uint8_t digit[4] = {0, 0, 0, 0};
-  const int base = 2;  // bits 2..29 (1-based) -> 28 bits -> 4x7
+  const int base = 2;
 
   for (int d = 0; d < 4; d++) {
     uint8_t v = 0;
@@ -249,7 +235,7 @@ void Balboa9800CP::process_frame_() {
 
   const bool b_inverted = (this->get_bit1_(29) == 1);
   const bool b_set_heat = (this->get_bit1_(41) == 1);
-  const bool b_mode_std = (this->get_bit1_(60) == 1);   // 0=Economy, 1=Standard
+  const bool b_mode_std = (this->get_bit1_(60) == 1);
   const bool b_heating  = (this->get_bit1_(40) == 1);
   const bool b_temp_up  = (this->get_bit1_(30) == 1);
   const bool b_temp_dn  = (this->get_bit1_(39) == 1);
@@ -270,7 +256,6 @@ void Balboa9800CP::process_frame_() {
   flags |= (uint16_t) (b_jets     ? 1 : 0) << 8;
   flags |= (uint16_t) (b_light    ? 1 : 0) << 9;
 
-  // Publish display text if changed
   if (this->display_text_ != nullptr) {
     if (strncmp(this->last_display_, disp, 4) != 0) {
       this->display_text_->publish_state(disp);
@@ -279,13 +264,11 @@ void Balboa9800CP::process_frame_() {
     }
   }
 
-  // Publish temperature if changed
   if (this->water_temp_ != nullptr && temp_f != this->last_temp_f_) {
     this->water_temp_->publish_state((float) temp_f);
     this->last_temp_f_ = temp_f;
   }
 
-  // Publish binary flags only when any flag changes
   if (!this->last_flags_valid_ || flags != this->last_flags_) {
     this->last_flags_valid_ = true;
     this->last_flags_ = flags;
