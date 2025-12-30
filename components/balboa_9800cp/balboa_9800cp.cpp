@@ -1,35 +1,31 @@
 #include "balboa_9800cp.h"
-#include "esphome/core/log.h"
 
 #include <Arduino.h>
 #include <ctype.h>
 #include <string.h>
 
+#include "esphome/core/log.h"
+
 namespace esphome {
 namespace balboa_9800cp {
 
-Balboa9800CP *Balboa9800CP::instance_ = nullptr;
-
-}  // namespace balboa_9800cp
-}  // namespace esphome
-
 static const char *const TAG = "balboa_9800cp";
 
-void Balboa9800CP::dump_config() {
-  ESP_LOGCONFIG(TAG, "Balboa 9800CP:");
-  ESP_LOGCONFIG(TAG, "  clk_gpio: %d", this->clk_gpio_);
-  ESP_LOGCONFIG(TAG, "  ctrl_out_gpio: %d", this->ctrl_out_gpio_);
-  ESP_LOGCONFIG(TAG, "  gap_us: %u", (unsigned) this->gap_us_);
-  ESP_LOGCONFIG(TAG, "  press_frames: %u", (unsigned) this->press_frames_);
-}
+// Define static instance pointer (needed for ISR trampoline)
+Balboa9800CP *Balboa9800CP::instance_ = nullptr;
 
-
+/* =========================
+ *  Button
+ * ========================= */
 void BalboaButton::press_action() {
   if (this->parent_ != nullptr) {
     this->parent_->queue_command(this->cmd_);
   }
 }
 
+/* =========================
+ *  Wiring / config
+ * ========================= */
 void Balboa9800CP::set_pins(GPIOPin *clk, GPIOPin *data, GPIOPin *ctrl_in, GPIOPin *ctrl_out) {
   this->clk_ = clk;
   this->data_ = data;
@@ -37,8 +33,19 @@ void Balboa9800CP::set_pins(GPIOPin *clk, GPIOPin *data, GPIOPin *ctrl_in, GPIOP
   this->ctrl_out_ = ctrl_out;
 }
 
+void Balboa9800CP::dump_config() {
+  ESP_LOGCONFIG(TAG, "Balboa 9800CP:");
+  ESP_LOGCONFIG(TAG, "  clk_gpio: %d", this->clk_gpio_);
+  ESP_LOGCONFIG(TAG, "  ctrl_out_gpio: %d", this->ctrl_out_gpio_);
+  ESP_LOGCONFIG(TAG, "  gap_us: %u", static_cast<unsigned>(this->gap_us_));
+  ESP_LOGCONFIG(TAG, "  press_frames: %u", static_cast<unsigned>(this->press_frames_));
+}
+
+/* =========================
+ *  Lifecycle
+ * ========================= */
 void Balboa9800CP::setup() {
-  ESP_LOGW(TAG, "BALBOA COMPONENT setup() reached");
+  ESP_LOGI(TAG, "setup() entered");
   instance_ = this;
 
   this->clk_->setup();
@@ -47,7 +54,8 @@ void Balboa9800CP::setup() {
   this->ctrl_out_->setup();
 
   if (this->clk_gpio_ < 0 || this->ctrl_out_gpio_ < 0) {
-    ESP_LOGE(TAG, "GPIO numbers not set (clk_gpio=%d ctrl_out_gpio=%d). Check __init__.py set_gpio_numbers().",
+    ESP_LOGE(TAG,
+             "GPIO numbers not set (clk_gpio=%d ctrl_out_gpio=%d). Check __init__.py set_gpio_numbers().",
              this->clk_gpio_, this->ctrl_out_gpio_);
     return;
   }
@@ -59,11 +67,14 @@ void Balboa9800CP::setup() {
   // SAFE resistor-only injection: start ctrl_out as high-Z (INPUT)
   pinMode(this->ctrl_out_gpio_, INPUT);
 
-  ESP_LOGI(TAG, "Started (gap_us=%u press_frames=%u) clk_gpio=%d data_gpio=<GPIOPin> ctrl_in_gpio=<GPIOPin> ctrl_out_gpio=%d",
-           (unsigned) this->gap_us_, (unsigned) this->press_frames_,
+  ESP_LOGI(TAG, "Started (gap_us=%u press_frames=%u) clk_gpio=%d ctrl_out_gpio=%d",
+           static_cast<unsigned>(this->gap_us_), static_cast<unsigned>(this->press_frames_),
            this->clk_gpio_, this->ctrl_out_gpio_);
 }
 
+/* =========================
+ *  ISR / capture
+ * ========================= */
 void IRAM_ATTR Balboa9800CP::isr_router_() {
   if (Balboa9800CP::instance_ != nullptr) {
     Balboa9800CP::instance_->on_clock_edge_();
@@ -94,10 +105,18 @@ void IRAM_ATTR Balboa9800CP::on_clock_edge_() {
 
     if (this->frames_left_ > 0) {
       switch (this->pending_cmd_) {
-        case 1: pattern = 0b1110; break;  // Up
-        case 2: pattern = 0b1111; break;  // Down
-        case 3: pattern = 0b1000; break;  // Mode
-        default: pattern = 0b0000; break;
+        case 1:
+          pattern = 0b1110;  // Up
+          break;
+        case 2:
+          pattern = 0b1111;  // Down
+          break;
+        case 3:
+          pattern = 0b1000;  // Mode
+          break;
+        default:
+          pattern = 0b0000;
+          break;
       }
     } else {
       pattern = 0b0000;  // release frame
@@ -139,7 +158,9 @@ void Balboa9800CP::queue_command(uint8_t cmd) {
   this->frames_left_ = this->press_frames_;
 }
 
-/* -------- decoder mapping helpers -------- */
+/* =========================
+ *  Decoder helpers
+ * ========================= */
 int Balboa9800CP::get_bit1_(int bit_1_index) const {
   if (bit_1_index < 1 || bit_1_index > 76) return 0;
   return this->bits_[bit_1_index - 1] ? 1 : 0;
@@ -167,27 +188,27 @@ char Balboa9800CP::decode_digit_(uint8_t seg, bool inverted) const {
       case 0b1001111: return 'E';
       default: return '?';
     }
-  } else {
-    switch (seg) {
-      case 0b0000000: return ' ';
-      case 0b1111110: return '0';
-      case 0b0000110: return '1';
-      case 0b1101101: return '2';
-      case 0b1001111: return '3';
-      case 0b0010111: return '4';
-      case 0b1011011: return '5';
-      case 0b1111011: return '6';
-      case 0b0001110: return '7';
-      case 0b1111111: return '8';
-      case 0b0011111: return '9';
-      case 0b0111001: return 'F';
-      case 0b1111000: return 'C';
-      case 0b1110000: return 'L';
-      case 0b0100011: return 'n';
-      case 0b0110111: return 'H';
-      case 0b1111001: return 'E';
-      default: return '?';
-    }
+  }
+
+  switch (seg) {
+    case 0b0000000: return ' ';
+    case 0b1111110: return '0';
+    case 0b0000110: return '1';
+    case 0b1101101: return '2';
+    case 0b1001111: return '3';
+    case 0b0010111: return '4';
+    case 0b1011011: return '5';
+    case 0b1111011: return '6';
+    case 0b0001110: return '7';
+    case 0b1111111: return '8';
+    case 0b0011111: return '9';
+    case 0b0111001: return 'F';
+    case 0b1111000: return 'C';
+    case 0b1110000: return 'L';
+    case 0b0100011: return 'n';
+    case 0b0110111: return 'H';
+    case 0b1111001: return 'E';
+    default: return '?';
   }
 }
 
@@ -201,19 +222,19 @@ void Balboa9800CP::decode_display_(char out[5], bool &inverted) const {
     uint8_t v = 0;
     for (int k = 0; k < 7; k++) {
       v <<= 1;
-      v |= (uint8_t) this->get_bit1_(base + d * 7 + k);
+      v |= static_cast<uint8_t>(this->get_bit1_(base + d * 7 + k));
     }
     digit[d] = v;
   }
 
-  char normal[4] = {
+  const char normal[4] = {
       this->decode_digit_(digit[3], false),
       this->decode_digit_(digit[2], false),
       this->decode_digit_(digit[1], false),
       this->decode_digit_(digit[0], false),
   };
 
-  char inv[4] = {
+  const char inv[4] = {
       this->decode_digit_(digit[0], true),
       this->decode_digit_(digit[1], true),
       this->decode_digit_(digit[2], true),
@@ -238,15 +259,19 @@ int Balboa9800CP::convert_temp_(const char *disp) const {
   int digits = 0;
 
   for (int i = 0; i < 3 && disp[i]; i++) {
-    if (isdigit((unsigned char) disp[i])) {
+    if (isdigit(static_cast<unsigned char>(disp[i]))) {
       val = val * 10 + (disp[i] - '0');
       digits++;
     }
   }
+
   if (digits == 0) return 60;
   return val;
 }
 
+/* =========================
+ *  Frame processing
+ * ========================= */
 void Balboa9800CP::process_frame_() {
   char disp[5];
   bool inv_flag = false;
@@ -256,33 +281,31 @@ void Balboa9800CP::process_frame_() {
 
   const bool b_inverted = (this->get_bit1_(29) == 1);
   const bool b_set_heat = (this->get_bit1_(41) == 1);
-  const bool b_mode_std = (this->get_bit1_(60) == 1);   // 0=Economy, 1=Standard
-  const bool b_heating  = (this->get_bit1_(40) == 1);
-  const bool b_temp_up  = (this->get_bit1_(30) == 1);
-  const bool b_temp_dn  = (this->get_bit1_(39) == 1);
-  const bool b_blower   = (this->get_bit1_(43) == 1);
-  const bool b_pump     = (this->get_bit1_(49) == 1);
-  const bool b_jets     = (this->get_bit1_(50) == 1);
-  const bool b_light    = (this->get_bit1_(48) == 1);
+  const bool b_mode_std = (this->get_bit1_(60) == 1);  // 0=Economy, 1=Standard
+  const bool b_heating = (this->get_bit1_(40) == 1);
+  const bool b_temp_up = (this->get_bit1_(30) == 1);
+  const bool b_temp_dn = (this->get_bit1_(39) == 1);
+  const bool b_blower = (this->get_bit1_(43) == 1);
+  const bool b_pump = (this->get_bit1_(49) == 1);
+  const bool b_jets = (this->get_bit1_(50) == 1);
+  const bool b_light = (this->get_bit1_(48) == 1);
 
-  // ✅ DEBUG line: shows what the decoder is seeing every processed frame
   ESP_LOGD(TAG,
            "disp='%s' temp_f=%d inv=%d set_heat=%d mode_std=%d heating=%d up=%d down=%d blower=%d pump=%d jets=%d light=%d",
-           disp, temp_f,
-           b_inverted, b_set_heat, b_mode_std, b_heating, b_temp_up, b_temp_dn,
-           b_blower, b_pump, b_jets, b_light);
+           disp, temp_f, b_inverted, b_set_heat, b_mode_std, b_heating, b_temp_up, b_temp_dn, b_blower, b_pump,
+           b_jets, b_light);
 
   uint16_t flags = 0;
-  flags |= (uint16_t) (b_inverted ? 1 : 0) << 0;
-  flags |= (uint16_t) (b_set_heat ? 1 : 0) << 1;
-  flags |= (uint16_t) (b_mode_std ? 1 : 0) << 2;
-  flags |= (uint16_t) (b_heating  ? 1 : 0) << 3;
-  flags |= (uint16_t) (b_temp_up  ? 1 : 0) << 4;
-  flags |= (uint16_t) (b_temp_dn  ? 1 : 0) << 5;
-  flags |= (uint16_t) (b_blower   ? 1 : 0) << 6;
-  flags |= (uint16_t) (b_pump     ? 1 : 0) << 7;
-  flags |= (uint16_t) (b_jets     ? 1 : 0) << 8;
-  flags |= (uint16_t) (b_light    ? 1 : 0) << 9;
+  flags |= static_cast<uint16_t>(b_inverted ? 1 : 0) << 0;
+  flags |= static_cast<uint16_t>(b_set_heat ? 1 : 0) << 1;
+  flags |= static_cast<uint16_t>(b_mode_std ? 1 : 0) << 2;
+  flags |= static_cast<uint16_t>(b_heating ? 1 : 0) << 3;
+  flags |= static_cast<uint16_t>(b_temp_up ? 1 : 0) << 4;
+  flags |= static_cast<uint16_t>(b_temp_dn ? 1 : 0) << 5;
+  flags |= static_cast<uint16_t>(b_blower ? 1 : 0) << 6;
+  flags |= static_cast<uint16_t>(b_pump ? 1 : 0) << 7;
+  flags |= static_cast<uint16_t>(b_jets ? 1 : 0) << 8;
+  flags |= static_cast<uint16_t>(b_light ? 1 : 0) << 9;
 
   // Publish display text if changed
   if (this->display_text_ != nullptr) {
@@ -295,7 +318,7 @@ void Balboa9800CP::process_frame_() {
 
   // Publish temperature if changed
   if (this->water_temp_ != nullptr && temp_f != this->last_temp_f_) {
-    this->water_temp_->publish_state((float) temp_f);
+    this->water_temp_->publish_state(static_cast<float>(temp_f));
     this->last_temp_f_ = temp_f;
   }
 
