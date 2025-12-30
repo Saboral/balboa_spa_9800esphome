@@ -62,7 +62,7 @@ class Balboa9800CP : public Component {
   void IRAM_ATTR on_clock_edge_();
   void process_frame_();
 
-  // decoder.js helpers (ported directly)
+  // decoder helpers (ported mapping)
   int get_bit1_(int bit_1_index) const;  // 1..76
   char decode_digit_(uint8_t seg, bool inverted) const;
   void decode_display_(char out[5], bool &inverted) const;
