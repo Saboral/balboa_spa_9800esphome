@@ -31,13 +31,19 @@ void Balboa9800CP::setup() {
   this->data_->setup();
   this->ctrl_in_->setup();
   this->ctrl_out_->setup();
-  this->ctrl_out_->digital_write(false);
+
+  // Cache raw GPIO number for ctrl_out so we can implement safe open-drain/high-Z in ISR
+  this->ctrl_out_gpio_ = this->ctrl_out_->get_pin();
+
+  // IMPORTANT: start HIGH-Z (INPUT) so we never accidentally drive the control line at boot
+  pinMode(this->ctrl_out_gpio_, INPUT);
 
   const int clk_pin = this->clk_->get_pin();
   pinMode(clk_pin, INPUT);
   attachInterrupt(digitalPinToInterrupt(clk_pin), Balboa9800CP::isr_router_, RISING);
 
-  ESP_LOGI(TAG, "Started (gap_us=%u press_frames=%u)", (unsigned) this->gap_us_, (unsigned) this->press_frames_);
+  ESP_LOGI(TAG, "Started (gap_us=%u press_frames=%u) ctrl_out_gpio=%d",
+           (unsigned) this->gap_us_, (unsigned) this->press_frames_, this->ctrl_out_gpio_);
 }
 
 void IRAM_ATTR Balboa9800CP::isr_router_() {
@@ -49,7 +55,7 @@ void IRAM_ATTR Balboa9800CP::on_clock_edge_() {
   const uint32_t dt = now - this->last_edge_us_;
   this->last_edge_us_ = now;
 
-  // Frame boundary (decoder.js assumes fixed 76-bit frames; we reset on long inter-frame gap)
+  // Frame boundary (reset on long inter-frame gap)
   if (dt > this->gap_us_) this->bit_index_ = 0;
 
   const int i = this->bit_index_;
@@ -58,7 +64,7 @@ void IRAM_ATTR Balboa9800CP::on_clock_edge_() {
   // Capture DATA bit (board -> topside)
   this->bits_[i] = this->data_->digital_read() ? 1 : 0;
 
-  // Default CTRL pass-through
+  // Default CTRL pass-through (we only override last 4 bits during command frames)
   uint8_t out = this->ctrl_in_->digital_read() ? 1 : 0;
 
   // Inject CTRL last 4 bits (i=72..75) with verified button codes:
@@ -81,7 +87,16 @@ void IRAM_ATTR Balboa9800CP::on_clock_edge_() {
     out = (pattern >> (3 - bitpos)) & 0x1;  // MSB first
   }
 
-  this->ctrl_out_->digital_write(out);
+  // SAFE ESP32 control injection (resistor-only):
+  // open-drain/high-Z behavior:
+  // out=0 -> drive LOW (pull down)
+  // out=1 -> float (INPUT), let spa/topside pull HIGH
+  if (out == 0) {
+    pinMode(this->ctrl_out_gpio_, OUTPUT);
+    digitalWrite(this->ctrl_out_gpio_, LOW);
+  } else {
+    pinMode(this->ctrl_out_gpio_, INPUT);
+  }
 
   this->bit_index_++;
 
@@ -106,7 +121,6 @@ void Balboa9800CP::queue_command(uint8_t cmd) {
 }
 
 /* -------- decoder.js port (exact mapping) --------
-   From uploaded decoder.js:
    inverted: bit 29
    setHeat: bit 41
    mode: bit 60 (0 Economy, 1 Standard)
@@ -125,7 +139,6 @@ int Balboa9800CP::get_bit1_(int bit_1_index) const {
 }
 
 char Balboa9800CP::decode_digit_(uint8_t seg, bool inverted) const {
-  // Directly ported from decoder.js digit maps :contentReference[oaicite:2]{index=2}
   if (!inverted) {
     switch (seg) {
       case 0b0000000: return ' ';
@@ -172,14 +185,10 @@ char Balboa9800CP::decode_digit_(uint8_t seg, bool inverted) const {
 }
 
 void Balboa9800CP::decode_display_(char out[5], bool &inverted) const {
-  // displayBits = dataString.substring(1,29) => 28 bits starting at bit index 2 (1-based)
-  // inverted flag is bit 29 (1-based)
   inverted = (this->get_bit1_(29) == 1);
 
-  // Build four 7-bit digits from bits 2..29 (1-based), grouped into 4*7.
-  // digit[0] = bits 2..8, digit[1] = 9..15, digit[2] = 16..22, digit[3] = 23..29
   uint8_t digit[4] = {0, 0, 0, 0};
-  const int base = 2;
+  const int base = 2;  // bits 2..29 (1-based) -> 28 bits -> 4x7
 
   for (int d = 0; d < 4; d++) {
     uint8_t v = 0;
@@ -190,10 +199,6 @@ void Balboa9800CP::decode_display_(char out[5], bool &inverted) const {
     digit[d] = v;
   }
 
-  // decoder.js normal ordering:
-  //   [map(d4), map(d3), map(d2), map(d1)]
-  // inverted ordering:
-  //   [invMap(d1), invMap(d2), invMap(d3), invMap(d4)]
   char normal[4] = {
       this->decode_digit_(digit[3], false),
       this->decode_digit_(digit[2], false),
@@ -222,7 +227,6 @@ void Balboa9800CP::decode_display_(char out[5], bool &inverted) const {
 }
 
 int Balboa9800CP::convert_temp_(const char *disp) const {
-  // decoder.js: parseInt(display.join('').substring(0,3)) else default 60
   int val = 0;
   int digits = 0;
 
@@ -243,8 +247,6 @@ void Balboa9800CP::process_frame_() {
 
   const int temp_f = this->convert_temp_(disp);
 
-  // Pack flags for change detection
-  // Bits per decoder.js :contentReference[oaicite:3]{index=3}
   const bool b_inverted = (this->get_bit1_(29) == 1);
   const bool b_set_heat = (this->get_bit1_(41) == 1);
   const bool b_mode_std = (this->get_bit1_(60) == 1);   // 0=Economy, 1=Standard
