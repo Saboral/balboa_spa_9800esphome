@@ -1,31 +1,34 @@
 #include "balboa_9800cp.h"
+#include "esphome/core/log.h"
 
 #include <Arduino.h>
-#include <ctype.h>
-#include <string.h>
-
-#include "esphome/core/log.h"
+#include "driver/gpio.h"
 
 namespace esphome {
 namespace balboa_9800cp {
 
 static const char *const TAG = "balboa_9800cp";
 
-// Define static instance pointer (needed for ISR trampoline)
+// ---- static instance pointer (fixes your undefined reference) ----
 Balboa9800CP *Balboa9800CP::instance_ = nullptr;
 
-/* =========================
- *  Button
- * ========================= */
+// ---- ISR safety helpers ----
+static portMUX_TYPE balboa_mux = portMUX_INITIALIZER_UNLOCKED;
+
 void BalboaButton::press_action() {
   if (this->parent_ != nullptr) {
     this->parent_->queue_command(this->cmd_);
   }
 }
 
-/* =========================
- *  Wiring / config
- * ========================= */
+void Balboa9800CP::dump_config() {
+  ESP_LOGCONFIG(TAG, "Balboa 9800CP:");
+  ESP_LOGCONFIG(TAG, "  clk_gpio: %d", this->clk_gpio_);
+  ESP_LOGCONFIG(TAG, "  ctrl_out_gpio: %d", this->ctrl_out_gpio_);
+  ESP_LOGCONFIG(TAG, "  gap_us: %u", (unsigned) this->gap_us_);
+  ESP_LOGCONFIG(TAG, "  press_frames: %u", (unsigned) this->press_frames_);
+}
+
 void Balboa9800CP::set_pins(GPIOPin *clk, GPIOPin *data, GPIOPin *ctrl_in, GPIOPin *ctrl_out) {
   this->clk_ = clk;
   this->data_ = data;
@@ -33,26 +36,15 @@ void Balboa9800CP::set_pins(GPIOPin *clk, GPIOPin *data, GPIOPin *ctrl_in, GPIOP
   this->ctrl_out_ = ctrl_out;
 }
 
-void Balboa9800CP::dump_config() {
-  ESP_LOGCONFIG(TAG, "Balboa 9800CP:");
-  ESP_LOGCONFIG(TAG, "  clk_gpio: %d", this->clk_gpio_);
-  ESP_LOGCONFIG(TAG, "  ctrl_out_gpio: %d", this->ctrl_out_gpio_);
-  ESP_LOGCONFIG(TAG, "  gap_us: %u", static_cast<unsigned>(this->gap_us_));
-  ESP_LOGCONFIG(TAG, "  press_frames: %u", static_cast<unsigned>(this->press_frames_));
-}
-
-/* =========================
- *  Lifecycle
- * ========================= */
 void Balboa9800CP::setup() {
-  ESP_LOGI(TAG, "setup() entered");
+  ESP_LOGW(TAG, "setup() reached");
   instance_ = this;
 
-  // Normal ESPHome pin setup
-  this->clk_->setup();
-  this->data_->setup();
-  this->ctrl_in_->setup();
-  this->ctrl_out_->setup();
+  // Normal ESPHome pin setup (OK outside ISR)
+  if (this->clk_) this->clk_->setup();
+  if (this->data_) this->data_->setup();
+  if (this->ctrl_in_) this->ctrl_in_->setup();
+  if (this->ctrl_out_) this->ctrl_out_->setup();
 
   if (this->clk_gpio_ < 0 || this->ctrl_out_gpio_ < 0) {
     ESP_LOGE(TAG,
@@ -61,30 +53,43 @@ void Balboa9800CP::setup() {
     return;
   }
 
-  // Ensure clock pin is input and attach interrupt on raw GPIO
-  pinMode(this->clk_gpio_, INPUT);
+  // --- Configure CLK interrupt using ESP-IDF (more reliable than attachInterrupt in some ESPHome builds) ---
+  gpio_num_t clk_gpio = (gpio_num_t) this->clk_gpio_;
+  gpio_reset_pin(clk_gpio);
+  gpio_set_direction(clk_gpio, GPIO_MODE_INPUT);
+  gpio_set_intr_type(clk_gpio, GPIO_INTR_POSEDGE);  // try GPIO_INTR_ANYEDGE if needed
 
-  // CHANGE is more tolerant of non-ideal clock edges
-  attachInterrupt(digitalPinToInterrupt(this->clk_gpio_), Balboa9800CP::isr_router_, CHANGE);
+  // ctrl_out starts HIGH-Z (INPUT) for safe resistor-only injection
+  gpio_num_t ctrl_out_gpio = (gpio_num_t) this->ctrl_out_gpio_;
+  gpio_reset_pin(ctrl_out_gpio);
+  gpio_set_direction(ctrl_out_gpio, GPIO_MODE_INPUT);
 
-  // SAFE resistor-only injection: start ctrl_out as high-Z (INPUT)
-  pinMode(this->ctrl_out_gpio_, INPUT);
+  // Install ISR service once
+  static bool isr_service_installed = false;
+  if (!isr_service_installed) {
+    esp_err_t e = gpio_install_isr_service(ESP_INTR_FLAG_IRAM);
+    if (e != ESP_OK && e != ESP_ERR_INVALID_STATE) {
+      ESP_LOGE(TAG, "gpio_install_isr_service failed: %d", (int) e);
+    } else {
+      isr_service_installed = true;
+    }
+  }
 
-  // Reset capture state
-  this->bit_index_ = 0;
-  this->frame_ready_ = false;
-  this->last_edge_us_ = micros();
-  this->isr_count_ = 0;
-  this->last_report_ms_ = millis();
+  esp_err_t e2 = gpio_isr_handler_add(clk_gpio, (gpio_isr_t) &Balboa9800CP::isr_router_, nullptr);
+  if (e2 != ESP_OK) {
+    ESP_LOGE(TAG, "gpio_isr_handler_add failed: %d", (int) e2);
+    return;
+  }
 
-  ESP_LOGI(TAG, "Started (gap_us=%u press_frames=%u) clk_gpio=%d ctrl_out_gpio=%d",
-           static_cast<unsigned>(this->gap_us_), static_cast<unsigned>(this->press_frames_),
-           this->clk_gpio_, this->ctrl_out_gpio_);
+  ESP_LOGI(TAG,
+           "ISR attached. gap_us=%u press_frames=%u clk_gpio=%d data_pin=%d ctrl_in_pin=%d ctrl_out_gpio=%d",
+           (unsigned) this->gap_us_, (unsigned) this->press_frames_,
+           this->clk_gpio_,
+           this->data_ ? this->data_->get_pin() : -1,
+           this->ctrl_in_ ? this->ctrl_in_->get_pin() : -1,
+           this->ctrl_out_gpio_);
 }
 
-/* =========================
- *  ISR / capture
- * ========================= */
 void IRAM_ATTR Balboa9800CP::isr_router_() {
   if (Balboa9800CP::instance_ != nullptr) {
     Balboa9800CP::instance_->on_clock_edge_();
@@ -92,69 +97,72 @@ void IRAM_ATTR Balboa9800CP::isr_router_() {
 }
 
 void IRAM_ATTR Balboa9800CP::on_clock_edge_() {
-  // Count ISR hits (diagnostic)
-  this->isr_count_++;
+  // Step 1 proof-of-life: count edges
+  this->isr_edge_count_++;
 
   const uint32_t now = micros();
   const uint32_t dt = now - this->last_edge_us_;
   this->last_edge_us_ = now;
 
   // Frame boundary
-  if (dt > this->gap_us_) this->bit_index_ = 0;
+  if (dt > this->gap_us_) {
+    this->bit_index_ = 0;
+  }
 
-  const int i = this->bit_index_;
-  if (i >= 76) return;
+  int i = this->bit_index_;
+  if (i < 0 || i >= 76) return;
 
-  // Capture DATA bit (board -> topside)
-  this->bits_[i] = this->data_->digital_read() ? 1 : 0;
+  // IMPORTANT: use gpio_get_level() inside ISR (avoid GPIOPin calls in ISR)
+  int data_gpio = this->data_ ? this->data_->get_pin() : -1;
+  int ctrl_in_gpio = this->ctrl_in_ ? this->ctrl_in_->get_pin() : -1;
 
-  // Default CTRL pass-through
-  uint8_t out = this->ctrl_in_->digital_read() ? 1 : 0;
+  uint8_t data_bit = 0;
+  if (data_gpio >= 0) data_bit = (uint8_t) gpio_get_level((gpio_num_t) data_gpio);
 
-  // Inject CTRL last 4 bits (i=72..75) with verified button codes:
-  // steady 0000, Up 1110, Down 1111, Mode 1000
+  // capture bit
+  this->bits_[i] = data_bit ? 1 : 0;
+
+  // pass-through ctrl default
+  uint8_t out = 1;
+  if (ctrl_in_gpio >= 0) out = (uint8_t) gpio_get_level((gpio_num_t) ctrl_in_gpio);
+
+  // Injection (same behavior as your original)
   if ((this->frames_left_ > 0 || this->release_frame_) && i >= 72) {
     uint8_t pattern = 0b0000;
 
     if (this->frames_left_ > 0) {
       switch (this->pending_cmd_) {
-        case 1:
-          pattern = 0b1110;  // Up
-          break;
-        case 2:
-          pattern = 0b1111;  // Down
-          break;
-        case 3:
-          pattern = 0b1000;  // Mode
-          break;
-        default:
-          pattern = 0b0000;
-          break;
+        case 1: pattern = 0b1110; break;  // Up
+        case 2: pattern = 0b1111; break;  // Down
+        case 3: pattern = 0b1000; break;  // Mode
+        default: pattern = 0b0000; break;
       }
     } else {
-      pattern = 0b0000;  // release frame
+      pattern = 0b0000;
     }
 
-    const int bitpos = i - 72;              // 0..3
+    int bitpos = i - 72;                    // 0..3
     out = (pattern >> (3 - bitpos)) & 0x1;  // MSB first
   }
 
-  // SAFE open-drain/high-Z behavior (resistor-only injection):
-  // out=0 -> OUTPUT LOW (pull down)
-  // out=1 -> INPUT (float), allowing spa pull-up / pass-through to represent HIGH
+  // SAFE open-drain/high-Z behavior:
+  gpio_num_t ctrl_out_gpio = (gpio_num_t) this->ctrl_out_gpio_;
   if (out == 0) {
-    pinMode(this->ctrl_out_gpio_, OUTPUT);
-    digitalWrite(this->ctrl_out_gpio_, LOW);
+    gpio_set_direction(ctrl_out_gpio, GPIO_MODE_OUTPUT);
+    gpio_set_level(ctrl_out_gpio, 0);
   } else {
-    pinMode(this->ctrl_out_gpio_, INPUT);
+    gpio_set_direction(ctrl_out_gpio, GPIO_MODE_INPUT);  // high-Z
   }
 
   this->bit_index_++;
 
   if (this->bit_index_ >= 76) {
+    // mark frame ready
+    portENTER_CRITICAL_ISR(&balboa_mux);
     this->frame_ready_ = true;
+    portEXIT_CRITICAL_ISR(&balboa_mux);
 
-    // Press bookkeeping: hold N frames, then one release frame
+    // Press bookkeeping
     if (this->frames_left_ > 0) {
       this->frames_left_--;
       if (this->frames_left_ == 0) this->release_frame_ = true;
@@ -171,208 +179,40 @@ void Balboa9800CP::queue_command(uint8_t cmd) {
   this->frames_left_ = this->press_frames_;
 }
 
-/* =========================
- *  Decoder helpers
- * ========================= */
-int Balboa9800CP::get_bit1_(int bit_1_index) const {
-  if (bit_1_index < 1 || bit_1_index > 76) return 0;
-  return this->bits_[bit_1_index - 1] ? 1 : 0;
-}
-
-char Balboa9800CP::decode_digit_(uint8_t seg, bool inverted) const {
-  if (!inverted) {
-    switch (seg) {
-      case 0b0000000: return ' ';
-      case 0b1111110: return '0';
-      case 0b0110000: return '1';
-      case 0b1101101: return '2';
-      case 0b1111001: return '3';
-      case 0b0110011: return '4';
-      case 0b1011011: return '5';
-      case 0b1011111: return '6';
-      case 0b1110000: return '7';
-      case 0b1111111: return '8';
-      case 0b1110011: return '9';
-      case 0b1000111: return 'F';
-      case 0b1001110: return 'C';
-      case 0b0001110: return 'L';
-      case 0b0010101: return 'n';
-      case 0b0110111: return 'H';
-      case 0b1001111: return 'E';
-      default: return '?';
-    }
-  }
-
-  switch (seg) {
-    case 0b0000000: return ' ';
-    case 0b1111110: return '0';
-    case 0b0000110: return '1';
-    case 0b1101101: return '2';
-    case 0b1001111: return '3';
-    case 0b0010111: return '4';
-    case 0b1011011: return '5';
-    case 0b1111011: return '6';
-    case 0b0001110: return '7';
-    case 0b1111111: return '8';
-    case 0b0011111: return '9';
-    case 0b0111001: return 'F';
-    case 0b1111000: return 'C';
-    case 0b1110000: return 'L';
-    case 0b0100011: return 'n';
-    case 0b0110111: return 'H';
-    case 0b1111001: return 'E';
-    default: return '?';
-  }
-}
-
-void Balboa9800CP::decode_display_(char out[5], bool &inverted) const {
-  inverted = (this->get_bit1_(29) == 1);
-
-  uint8_t digit[4] = {0, 0, 0, 0};
-  const int base = 2;  // bits 2..29 (1-based) -> 28 bits -> 4x7
-
-  for (int d = 0; d < 4; d++) {
-    uint8_t v = 0;
-    for (int k = 0; k < 7; k++) {
-      v <<= 1;
-      v |= static_cast<uint8_t>(this->get_bit1_(base + d * 7 + k));
-    }
-    digit[d] = v;
-  }
-
-  // ---- STEP 1 DEBUG: log raw segment bytes (shows actual 7-seg patterns) ----
-  // Use DEBUG level so it shows up even if tag level is DEBUG (your current config).
-  ESP_LOGD(TAG, "RAW segments: %02X %02X %02X %02X inv_flag=%d",
-           digit[0], digit[1], digit[2], digit[3], inverted ? 1 : 0);
-
-  const char normal[4] = {
-      this->decode_digit_(digit[3], false),
-      this->decode_digit_(digit[2], false),
-      this->decode_digit_(digit[1], false),
-      this->decode_digit_(digit[0], false),
-  };
-
-  const char inv[4] = {
-      this->decode_digit_(digit[0], true),
-      this->decode_digit_(digit[1], true),
-      this->decode_digit_(digit[2], true),
-      this->decode_digit_(digit[3], true),
-  };
-
-  bool normal_has_unknown = false;
-  for (int i = 0; i < 4; i++) {
-    if (normal[i] == '?') {
-      normal_has_unknown = true;
-      break;
-    }
-  }
-
-  const char *chosen = normal_has_unknown ? inv : normal;
-  for (int i = 0; i < 4; i++) out[i] = chosen[i];
-  out[4] = '\0';
-}
-
-int Balboa9800CP::convert_temp_(const char *disp) const {
-  int val = 0;
-  int digits = 0;
-
-  for (int i = 0; i < 3 && disp[i]; i++) {
-    if (isdigit(static_cast<unsigned char>(disp[i]))) {
-      val = val * 10 + (disp[i] - '0');
-      digits++;
-    }
-  }
-
-  if (digits == 0) return 60;
-  return val;
-}
-
-/* =========================
- *  Frame processing
- * ========================= */
-void Balboa9800CP::process_frame_() {
-  char disp[5];
-  bool inv_flag = false;
-  this->decode_display_(disp, inv_flag);
-
-  const int temp_f = this->convert_temp_(disp);
-
-  const bool b_inverted = (this->get_bit1_(29) == 1);
-  const bool b_set_heat = (this->get_bit1_(41) == 1);
-  const bool b_mode_std = (this->get_bit1_(60) == 1);  // 0=Economy, 1=Standard
-  const bool b_heating = (this->get_bit1_(40) == 1);
-  const bool b_temp_up = (this->get_bit1_(30) == 1);
-  const bool b_temp_dn = (this->get_bit1_(39) == 1);
-  const bool b_blower = (this->get_bit1_(43) == 1);
-  const bool b_pump = (this->get_bit1_(49) == 1);
-  const bool b_jets = (this->get_bit1_(50) == 1);
-  const bool b_light = (this->get_bit1_(48) == 1);
-
-  ESP_LOGD(TAG,
-           "disp='%s' temp_f=%d inv=%d set_heat=%d mode_std=%d heating=%d up=%d down=%d blower=%d pump=%d jets=%d light=%d",
-           disp, temp_f, b_inverted, b_set_heat, b_mode_std, b_heating, b_temp_up, b_temp_dn, b_blower, b_pump,
-           b_jets, b_light);
-
-  uint16_t flags = 0;
-  flags |= static_cast<uint16_t>(b_inverted ? 1 : 0) << 0;
-  flags |= static_cast<uint16_t>(b_set_heat ? 1 : 0) << 1;
-  flags |= static_cast<uint16_t>(b_mode_std ? 1 : 0) << 2;
-  flags |= static_cast<uint16_t>(b_heating ? 1 : 0) << 3;
-  flags |= static_cast<uint16_t>(b_temp_up ? 1 : 0) << 4;
-  flags |= static_cast<uint16_t>(b_temp_dn ? 1 : 0) << 5;
-  flags |= static_cast<uint16_t>(b_blower ? 1 : 0) << 6;
-  flags |= static_cast<uint16_t>(b_pump ? 1 : 0) << 7;
-  flags |= static_cast<uint16_t>(b_jets ? 1 : 0) << 8;
-  flags |= static_cast<uint16_t>(b_light ? 1 : 0) << 9;
-
-  // Publish display text if changed
-  if (this->display_text_ != nullptr) {
-    if (strncmp(this->last_display_, disp, 4) != 0) {
-      this->display_text_->publish_state(disp);
-      strncpy(this->last_display_, disp, 4);
-      this->last_display_[4] = '\0';
-    }
-  }
-
-  // Publish temperature if changed
-  if (this->water_temp_ != nullptr && temp_f != this->last_temp_f_) {
-    this->water_temp_->publish_state(static_cast<float>(temp_f));
-    this->last_temp_f_ = temp_f;
-  }
-
-  // Publish binary flags only when any flag changes
-  if (!this->last_flags_valid_ || flags != this->last_flags_) {
-    this->last_flags_valid_ = true;
-    this->last_flags_ = flags;
-
-    if (this->inverted_ != nullptr) this->inverted_->publish_state(b_inverted);
-    if (this->set_heat_ != nullptr) this->set_heat_->publish_state(b_set_heat);
-    if (this->mode_standard_ != nullptr) this->mode_standard_->publish_state(b_mode_std);
-    if (this->heating_ != nullptr) this->heating_->publish_state(b_heating);
-    if (this->temp_up_display_ != nullptr) this->temp_up_display_->publish_state(b_temp_up);
-    if (this->temp_down_display_ != nullptr) this->temp_down_display_->publish_state(b_temp_dn);
-    if (this->blower_ != nullptr) this->blower_->publish_state(b_blower);
-    if (this->pump_ != nullptr) this->pump_->publish_state(b_pump);
-    if (this->jets_ != nullptr) this->jets_->publish_state(b_jets);
-    if (this->light_ != nullptr) this->light_->publish_state(b_light);
-  }
-}
-
 void Balboa9800CP::loop() {
-  // 1 Hz diagnostic report (safe, non-ISR logging)
-  const uint32_t now = millis();
-  if (now - this->last_report_ms_ >= 1000) {
-    this->last_report_ms_ = now;
-    ESP_LOGI(TAG, "ISR count=%lu bit_index=%d frame_ready=%d",
-             static_cast<unsigned long>(this->isr_count_),
-             this->bit_index_,
-             this->frame_ready_ ? 1 : 0);
+  // Step 1: prove interrupts are happening (once per second)
+  static uint32_t last_log_ms = 0;
+  uint32_t now = millis();
+  if (now - last_log_ms >= 1000) {
+    last_log_ms = now;
+    uint32_t edges = this->isr_edge_count_;
+    this->isr_edge_count_ = 0;
+    ESP_LOGD(TAG, "clk edges/sec=%u", (unsigned) edges);
   }
 
-  if (!this->frame_ready_) return;
+  // RAW frame logging
+  bool ready = false;
+  portENTER_CRITICAL(&balboa_mux);
+  ready = this->frame_ready_;
+  if (ready) this->frame_ready_ = false;
+  portEXIT_CRITICAL(&balboa_mux);
 
-  this->frame_ready_ = false;
-  this->process_frame_();
+  if (!ready) return;
+
+  // copy bits locally (avoid races)
+  uint8_t local_bits[76];
+  portENTER_CRITICAL(&balboa_mux);
+  for (int i = 0; i < 76; i++) local_bits[i] = this->bits_[i];
+  portEXIT_CRITICAL(&balboa_mux);
+
+  // Print RAW bits as 76-char string
+  char raw[77];
+  for (int i = 0; i < 76; i++) raw[i] = local_bits[i] ? '1' : '0';
+  raw[76] = '\0';
+
+  ESP_LOGD(TAG, "RAW(%u us gap): %s", (unsigned) this->gap_us_, raw);
+
+  // (Decoder can be re-enabled later once RAW proves we have frames)
 }
 
 }  // namespace balboa_9800cp
