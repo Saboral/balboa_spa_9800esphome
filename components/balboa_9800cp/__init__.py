@@ -22,7 +22,7 @@ CONFIG_SCHEMA = (
             cv.Required(CONF_CLK_PIN): pins.gpio_input_pin_schema,
             cv.Required(CONF_DATA_PIN): pins.gpio_input_pin_schema,
             cv.Required(CONF_CTRL_IN_PIN): pins.gpio_input_pin_schema,
-            cv.Required(CONF_CTRL_OUT_PIN): pins.gpio_output_pin_schema,
+            cv.Required(CONF_CTRL_OUT_PIN): pins.gpio_input_pin_schema,
             cv.Optional(CONF_GAP_US, default=8000): cv.int_range(min=1000, max=50000),
             cv.Optional(CONF_PRESS_FRAMES, default=6): cv.int_range(min=1, max=30),
         }
