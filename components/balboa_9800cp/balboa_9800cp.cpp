@@ -48,7 +48,7 @@ void Balboa9800CP::setup() {
   ESP_LOGI(TAG, "setup() entered");
   instance_ = this;
 
-  this->clk_->setup();
+  // this->clk_->setup();
   this->data_->setup();
   this->ctrl_in_->setup();
   this->ctrl_out_->setup();
