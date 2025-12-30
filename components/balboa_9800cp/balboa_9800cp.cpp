@@ -314,6 +314,9 @@ void Balboa9800CP::process_frame_() {
       strncpy(this->last_display_, disp, 4);
       this->last_display_[4] = '\0';
     }
+    
+  ESP_LOGV(TAG, "Frame ready");
+
   }
 
   // Publish temperature if changed
