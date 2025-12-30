@@ -45,7 +45,7 @@ void Balboa9800CP::setup() {
   // SAFE resistor-only injection: start ctrl_out as high-Z (INPUT)
   pinMode(this->ctrl_out_gpio_, INPUT);
 
-  ESP_LOGI(TAG, "Started (gap_us=%u press_frames=%u) clk_gpio=%d ctrl_out_gpio=%d",
+  ESP_LOGI(TAG, "Started (gap_us=%u press_frames=%u) clk_gpio=%d data_gpio=<GPIOPin> ctrl_in_gpio=<GPIOPin> ctrl_out_gpio=%d",
            (unsigned) this->gap_us_, (unsigned) this->press_frames_,
            this->clk_gpio_, this->ctrl_out_gpio_);
 }
@@ -123,7 +123,7 @@ void Balboa9800CP::queue_command(uint8_t cmd) {
   this->frames_left_ = this->press_frames_;
 }
 
-/* -------- decoder.js port (exact mapping) -------- */
+/* -------- decoder mapping helpers -------- */
 int Balboa9800CP::get_bit1_(int bit_1_index) const {
   if (bit_1_index < 1 || bit_1_index > 76) return 0;
   return this->bits_[bit_1_index - 1] ? 1 : 0;
@@ -248,6 +248,13 @@ void Balboa9800CP::process_frame_() {
   const bool b_pump     = (this->get_bit1_(49) == 1);
   const bool b_jets     = (this->get_bit1_(50) == 1);
   const bool b_light    = (this->get_bit1_(48) == 1);
+
+  // ✅ DEBUG line: shows what the decoder is seeing every processed frame
+  ESP_LOGD(TAG,
+           "disp='%s' temp_f=%d inv=%d set_heat=%d mode_std=%d heating=%d up=%d down=%d blower=%d pump=%d jets=%d light=%d",
+           disp, temp_f,
+           b_inverted, b_set_heat, b_mode_std, b_heating, b_temp_up, b_temp_dn,
+           b_blower, b_pump, b_jets, b_light);
 
   uint16_t flags = 0;
   flags |= (uint16_t) (b_inverted ? 1 : 0) << 0;
