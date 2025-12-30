@@ -3,10 +3,10 @@
 #include "esphome/core/component.h"
 #include "esphome/core/gpio.h"
 
-#include "esphome/components/sensor/sensor.h"
-#include "esphome/components/text_sensor/text_sensor.h"
 #include "esphome/components/binary_sensor/binary_sensor.h"
 #include "esphome/components/button/button.h"
+#include "esphome/components/sensor/sensor.h"
+#include "esphome/components/text_sensor/text_sensor.h"
 
 namespace esphome {
 namespace balboa_9800cp {
@@ -36,8 +36,13 @@ class Balboa9800CP : public Component {
  public:
   /* ---- Wiring ---- */
   void set_pins(GPIOPin *clk, GPIOPin *data, GPIOPin *ctrl_in, GPIOPin *ctrl_out);
-  void set_gpio_numbers(int clk_gpio, int ctrl_out_gpio) {
+
+  // Pass raw GPIO numbers from YAML. We use these for ISR-safe gpio_get_level()
+  // and for open-drain/high-Z control of ctrl_out.
+  void set_gpio_numbers(int clk_gpio, int data_gpio, int ctrl_in_gpio, int ctrl_out_gpio) {
     this->clk_gpio_ = clk_gpio;
+    this->data_gpio_ = data_gpio;
+    this->ctrl_in_gpio_ = ctrl_in_gpio;
     this->ctrl_out_gpio_ = ctrl_out_gpio;
   }
 
@@ -70,26 +75,28 @@ class Balboa9800CP : public Component {
 
  protected:
   /* ---- ISR plumbing ---- */
-  static void isr_router_();   // ISR trampoline
-  void on_clock_edge_();       // ISR body (IRAM_ATTR in .cpp only)
+  static void isr_router_();  // ISR trampoline
+  void on_clock_edge_();      // ISR body (IRAM_ATTR in .cpp only)
 
   /* ---- Frame processing ---- */
   void process_frame_();
 
-  /* ---- Decoder helpers ---- */
+  /* ---- Decoder helpers (kept for later stages) ---- */
   int get_bit1_(int bit_1_index) const;  // 1..76
   char decode_digit_(uint8_t seg, bool inverted) const;
   void decode_display_(char out[5], bool &inverted) const;
   int convert_temp_(const char *disp) const;
 
-  /* ---- GPIO pins (ESPHome abstractions) ---- */
+  /* ---- Pins (ESPHome abstractions; not used inside ISR) ---- */
   GPIOPin *clk_{nullptr};
   GPIOPin *data_{nullptr};
   GPIOPin *ctrl_in_{nullptr};
   GPIOPin *ctrl_out_{nullptr};
 
-  /* ---- Raw GPIO numbers ---- */
+  /* ---- Raw GPIO numbers (used in ISR via gpio_get_level) ---- */
   int clk_gpio_{-1};
+  int data_gpio_{-1};
+  int ctrl_in_gpio_{-1};
   int ctrl_out_gpio_{-1};
 
   /* ---- Frame capture ---- */
@@ -98,20 +105,20 @@ class Balboa9800CP : public Component {
   volatile int bit_index_{0};
   volatile bool frame_ready_{false};
 
+  /* ---- Timing ---- */
   uint32_t gap_us_{8000};
   uint8_t press_frames_{6};
 
   /* ---- CTRL injection state ---- */
-  volatile uint8_t pending_cmd_{0};   // 1=Up, 2=Down, 3=Mode
+  volatile uint8_t pending_cmd_{0};  // 1=Up, 2=Down, 3=Mode
   volatile uint8_t frames_left_{0};
   volatile bool release_frame_{false};
 
-  /* ---- ISR diagnostics (Step 1) ---- */
-  volatile uint32_t isr_edge_count_{0};   // REQUIRED for raw debug
-  uint32_t last_report_ms_{0};
-
   /* ---- ISR instance ---- */
   static Balboa9800CP *instance_;
+
+  /* ---- Step 1 diagnostics ---- */
+  volatile uint32_t isr_edge_count_{0};
 
   /* ---- Entity pointers ---- */
   sensor::Sensor *water_temp_{nullptr};
@@ -128,7 +135,7 @@ class Balboa9800CP : public Component {
   binary_sensor::BinarySensor *jets_{nullptr};
   binary_sensor::BinarySensor *light_{nullptr};
 
-  /* ---- Change suppression ---- */
+  /* ---- Change suppression (for later publish logic) ---- */
   int last_temp_f_{-999};
   uint16_t last_flags_{0};
   bool last_flags_valid_{false};
