@@ -1,12 +1,15 @@
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome.components import sensor
-from esphome.const import DEVICE_CLASS_TEMPERATURE, STATE_CLASS_MEASUREMENT, UNIT_FAHRENHEIT
+from esphome.const import DEVICE_CLASS_TEMPERATURE, STATE_CLASS_MEASUREMENT
 
 from . import Balboa9800CP
 
 CONF_BALBOA_ID = "balboa_id"
 CONF_WATER_TEMP_F = "water_temp_f"
+
+# ESPHome no longer exports UNIT_FAHRENHEIT in some versions; use a literal.
+UNIT_FAHRENHEIT = "°F"
 
 CONFIG_SCHEMA = cv.Schema(
     {
