@@ -18,8 +18,9 @@ ota:
 
 external_components:
   - source:
-      type: local
-      path: ./esphome-balboa-9800cp
+      type: git
+      url: https://github.com/Saboral/balboa_spa_9800esphome
+      ref: main
     components: [ balboa_9800cp ]
 
 balboa_9800cp:
@@ -35,15 +36,37 @@ sensor:
   - platform: balboa_9800cp
     balboa_id: spa_bus
     water_temp_f:
-      name: "Spa Water Temp"
+      name: "Spa Water Temperature"
+
+text_sensor:
+  - platform: balboa_9800cp
+    balboa_id: spa_bus
+    display:
+      name: "Spa Display"
 
 binary_sensor:
   - platform: balboa_9800cp
     balboa_id: spa_bus
+    inverted:
+      name: "Spa Display Inverted"
+    set_heat:
+      name: "Spa Set Heat"
+    mode_standard:
+      name: "Spa Standard Mode"
     heating:
       name: "Spa Heating"
-    standard_mode:
-      name: "Spa Standard Mode"
+    temp_up_display:
+      name: "Spa Temp Up Display"
+    temp_down_display:
+      name: "Spa Temp Down Display"
+    blower:
+      name: "Spa Blower"
+    pump:
+      name: "Spa Pump"
+    jets:
+      name: "Spa Jets"
+    light:
+      name: "Spa Light"
 
 button:
   - platform: balboa_9800cp
