@@ -8,8 +8,16 @@
 namespace esphome {
 namespace balboa_9800cp {
 
-static const char *TAG = "balboa_9800cp";
-Balboa9800CP *Balboa9800CP::instance_ = nullptr;
+static const char *const TAG = "balboa_9800cp";
+
+void Balboa9800CP::dump_config() {
+  ESP_LOGCONFIG(TAG, "Balboa 9800CP:");
+  ESP_LOGCONFIG(TAG, "  clk_gpio: %d", this->clk_gpio_);
+  ESP_LOGCONFIG(TAG, "  ctrl_out_gpio: %d", this->ctrl_out_gpio_);
+  ESP_LOGCONFIG(TAG, "  gap_us: %u", (unsigned) this->gap_us_);
+  ESP_LOGCONFIG(TAG, "  press_frames: %u", (unsigned) this->press_frames_);
+}
+
 
 void BalboaButton::press_action() {
   if (this->parent_ != nullptr) {
