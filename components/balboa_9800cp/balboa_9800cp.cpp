@@ -1,7 +1,9 @@
 #include "balboa_9800cp.h"
 #include "esphome/core/log.h"
+
 #include <Arduino.h>
 #include <ctype.h>
+#include <string.h>
 
 namespace esphome {
 namespace balboa_9800cp {
@@ -10,7 +12,9 @@ static const char *TAG = "balboa_9800cp";
 Balboa9800CP *Balboa9800CP::instance_ = nullptr;
 
 void BalboaButton::press_action() {
-  if (this->parent_ != nullptr) this->parent_->queue_command(this->cmd_);
+  if (this->parent_ != nullptr) {
+    this->parent_->queue_command(this->cmd_);
+  }
 }
 
 void Balboa9800CP::set_pins(GPIOPin *clk, GPIOPin *data, GPIOPin *ctrl_in, GPIOPin *ctrl_out) {
@@ -29,11 +33,11 @@ void Balboa9800CP::setup() {
   this->ctrl_out_->setup();
   this->ctrl_out_->digital_write(false);
 
-  auto clk_pin = this->clk_->get_pin();
+  const int clk_pin = this->clk_->get_pin();
   pinMode(clk_pin, INPUT);
   attachInterrupt(digitalPinToInterrupt(clk_pin), Balboa9800CP::isr_router_, RISING);
 
-  ESP_LOGI(TAG, "Started (ESP32) gap_us=%u press_frames=%u", (unsigned) this->gap_us_, this->press_frames_);
+  ESP_LOGI(TAG, "Started (gap_us=%u press_frames=%u)", (unsigned) this->gap_us_, (unsigned) this->press_frames_);
 }
 
 void IRAM_ATTR Balboa9800CP::isr_router_() {
@@ -45,23 +49,23 @@ void IRAM_ATTR Balboa9800CP::on_clock_edge_() {
   const uint32_t dt = now - this->last_edge_us_;
   this->last_edge_us_ = now;
 
-  // frame boundary after long gap (doc ~12ms; threshold configurable)
+  // Frame boundary (decoder.js assumes fixed 76-bit frames; we reset on long inter-frame gap)
   if (dt > this->gap_us_) this->bit_index_ = 0;
 
   const int i = this->bit_index_;
   if (i >= 76) return;
 
-  // capture DATA bit (board->topside)
+  // Capture DATA bit (board -> topside)
   this->bits_[i] = this->data_->digital_read() ? 1 : 0;
 
-  // default CTRL pass-through
+  // Default CTRL pass-through
   uint8_t out = this->ctrl_in_->digital_read() ? 1 : 0;
 
-  // Inject button presses by overriding last 4 bits of CTRL frame (same as earlier)
-  // Your verified codes:
-  // steady 0000, up 1110, down 1111, mode 1000
+  // Inject CTRL last 4 bits (i=72..75) with verified button codes:
+  // steady 0000, Up 1110, Down 1111, Mode 1000
   if ((this->frames_left_ > 0 || this->release_frame_) && i >= 72) {
     uint8_t pattern = 0b0000;
+
     if (this->frames_left_ > 0) {
       switch (this->pending_cmd_) {
         case 1: pattern = 0b1110; break;  // Up
@@ -70,12 +74,11 @@ void IRAM_ATTR Balboa9800CP::on_clock_edge_() {
         default: pattern = 0b0000; break;
       }
     } else {
-      pattern = 0b0000; // release frame
+      pattern = 0b0000;  // release frame
     }
 
-    // i=72..75 maps to pattern bit 3..0 (MSB first)
-    const int bitpos = i - 72;            // 0..3
-    out = (pattern >> (3 - bitpos)) & 0x1;
+    const int bitpos = i - 72;              // 0..3
+    out = (pattern >> (3 - bitpos)) & 0x1;  // MSB first
   }
 
   this->ctrl_out_->digital_write(out);
@@ -85,6 +88,7 @@ void IRAM_ATTR Balboa9800CP::on_clock_edge_() {
   if (this->bit_index_ >= 76) {
     this->frame_ready_ = true;
 
+    // Press bookkeeping: hold N frames, then one release frame
     if (this->frames_left_ > 0) {
       this->frames_left_--;
       if (this->frames_left_ == 0) this->release_frame_ = true;
@@ -101,16 +105,27 @@ void Balboa9800CP::queue_command(uint8_t cmd) {
   this->frames_left_ = this->press_frames_;
 }
 
-/* ---------- decoder.js port (exact mapping) ---------- */
-
+/* -------- decoder.js port (exact mapping) --------
+   From uploaded decoder.js:
+   inverted: bit 29
+   setHeat: bit 41
+   mode: bit 60 (0 Economy, 1 Standard)
+   heating: bit 40
+   tempUp: bit 30
+   tempDown: bit 39
+   blower: bit 43
+   pump: bit 49
+   jets: bit 50
+   light: bit 48
+   displayBits: dataString.substring(1,29)
+*/
 int Balboa9800CP::get_bit1_(int bit_1_index) const {
-  // decoder.js uses 1-based indexing: array[bit-1]
   if (bit_1_index < 1 || bit_1_index > 76) return 0;
   return this->bits_[bit_1_index - 1] ? 1 : 0;
 }
 
 char Balboa9800CP::decode_digit_(uint8_t seg, bool inverted) const {
-  // Exact digit maps from decoder.js :contentReference[oaicite:2]{index=2}
+  // Directly ported from decoder.js digit maps :contentReference[oaicite:2]{index=2}
   if (!inverted) {
     switch (seg) {
       case 0b0000000: return ' ';
@@ -157,62 +172,60 @@ char Balboa9800CP::decode_digit_(uint8_t seg, bool inverted) const {
 }
 
 void Balboa9800CP::decode_display_(char out[5], bool &inverted) const {
-  // decoder.js:
-  // displayBits = bits.substring(1,29) -> ignores first bit, takes next 28 bits (bits 2..29 1-based)
-  // inverted flag stored separately at bit 29 (1-based) which is bits_[28] (0-based)
+  // displayBits = dataString.substring(1,29) => 28 bits starting at bit index 2 (1-based)
+  // inverted flag is bit 29 (1-based)
   inverted = (this->get_bit1_(29) == 1);
 
-  // Build 4x 7-bit digits from bits 2..28 (1-based), i.e., array index 1..27 (0-based)
-  // We'll assemble digit segments in displayBits order: digit1 first, digit4 last,
-  // then choose orientation exactly like decoder.js.
+  // Build four 7-bit digits from bits 2..29 (1-based), grouped into 4*7.
+  // digit[0] = bits 2..8, digit[1] = 9..15, digit[2] = 16..22, digit[3] = 23..29
   uint8_t digit[4] = {0, 0, 0, 0};
+  const int base = 2;
 
-  // digit0 uses bits 2..8 (1-based), digit1 bits 9..15, digit2 bits 16..22, digit3 bits 23..29? (but displayBits stops at 28)
-  // decoder.js uses substring(1,29) and then slices [0..7), [7..14), [14..21), [21..28)
-  // That corresponds to 28 bits total (positions 2..29 exclusive?), but operationally 4*7=28 bits after ignoring the first.
-  // So we read bits 2..29 (1-based) for these 28 bits:
-  int base_bit = 2;
   for (int d = 0; d < 4; d++) {
     uint8_t v = 0;
     for (int k = 0; k < 7; k++) {
       v <<= 1;
-      v |= (uint8_t) this->get_bit1_(base_bit + d * 7 + k);
+      v |= (uint8_t) this->get_bit1_(base + d * 7 + k);
     }
     digit[d] = v;
   }
 
-  // decoder.js ordering:
-  // display = [ map(bits[21..28]), map(bits[14..21]), map(bits[7..14]), map(bits[0..7]) ]
-  // inverted = [ invMap(bits[0..7]), invMap(bits[7..14]), invMap(bits[14..21]), invMap(bits[21..28]) ]
-  // With our digit array in forward order, digit[0]=bits[0..7], digit[3]=bits[21..28]
+  // decoder.js normal ordering:
+  //   [map(d4), map(d3), map(d2), map(d1)]
+  // inverted ordering:
+  //   [invMap(d1), invMap(d2), invMap(d3), invMap(d4)]
   char normal[4] = {
-    this->decode_digit_(digit[3], false),
-    this->decode_digit_(digit[2], false),
-    this->decode_digit_(digit[1], false),
-    this->decode_digit_(digit[0], false),
+      this->decode_digit_(digit[3], false),
+      this->decode_digit_(digit[2], false),
+      this->decode_digit_(digit[1], false),
+      this->decode_digit_(digit[0], false),
   };
 
   char inv[4] = {
-    this->decode_digit_(digit[0], true),
-    this->decode_digit_(digit[1], true),
-    this->decode_digit_(digit[2], true),
-    this->decode_digit_(digit[3], true),
+      this->decode_digit_(digit[0], true),
+      this->decode_digit_(digit[1], true),
+      this->decode_digit_(digit[2], true),
+      this->decode_digit_(digit[3], true),
   };
 
-  // decoder.js chooses whichever orientation DOESN'T contain '?'.
-  bool normal_has_q = false;
-  for (int i = 0; i < 4; i++) if (normal[i] == '?') normal_has_q = true;
+  bool normal_has_unknown = false;
+  for (int i = 0; i < 4; i++) {
+    if (normal[i] == '?') {
+      normal_has_unknown = true;
+      break;
+    }
+  }
 
-  const char *chosen = normal_has_q ? inv : normal;
+  const char *chosen = normal_has_unknown ? inv : normal;
   for (int i = 0; i < 4; i++) out[i] = chosen[i];
   out[4] = '\0';
 }
 
 int Balboa9800CP::convert_temp_(const char *disp) const {
-  // decoder.js: take first 3 chars, parseInt; if NaN => 60
-  // We'll emulate behavior: parse first 3 chars that might include spaces/letters; if no digits => default 60.
+  // decoder.js: parseInt(display.join('').substring(0,3)) else default 60
   int val = 0;
   int digits = 0;
+
   for (int i = 0; i < 3 && disp[i]; i++) {
     if (isdigit((unsigned char) disp[i])) {
       val = val * 10 + (disp[i] - '0');
@@ -225,29 +238,67 @@ int Balboa9800CP::convert_temp_(const char *disp) const {
 
 void Balboa9800CP::process_frame_() {
   char disp[5];
-  bool inverted = false;
-  decode_display_(disp, inverted);
+  bool inv_flag = false;
+  this->decode_display_(disp, inv_flag);
 
-  const int temp_f = convert_temp_(disp);
+  const int temp_f = this->convert_temp_(disp);
 
-  // Publish temp (°F)
+  // Pack flags for change detection
+  // Bits per decoder.js :contentReference[oaicite:3]{index=3}
+  const bool b_inverted = (this->get_bit1_(29) == 1);
+  const bool b_set_heat = (this->get_bit1_(41) == 1);
+  const bool b_mode_std = (this->get_bit1_(60) == 1);   // 0=Economy, 1=Standard
+  const bool b_heating  = (this->get_bit1_(40) == 1);
+  const bool b_temp_up  = (this->get_bit1_(30) == 1);
+  const bool b_temp_dn  = (this->get_bit1_(39) == 1);
+  const bool b_blower   = (this->get_bit1_(43) == 1);
+  const bool b_pump     = (this->get_bit1_(49) == 1);
+  const bool b_jets     = (this->get_bit1_(50) == 1);
+  const bool b_light    = (this->get_bit1_(48) == 1);
+
+  uint16_t flags = 0;
+  flags |= (uint16_t) (b_inverted ? 1 : 0) << 0;
+  flags |= (uint16_t) (b_set_heat ? 1 : 0) << 1;
+  flags |= (uint16_t) (b_mode_std ? 1 : 0) << 2;
+  flags |= (uint16_t) (b_heating  ? 1 : 0) << 3;
+  flags |= (uint16_t) (b_temp_up  ? 1 : 0) << 4;
+  flags |= (uint16_t) (b_temp_dn  ? 1 : 0) << 5;
+  flags |= (uint16_t) (b_blower   ? 1 : 0) << 6;
+  flags |= (uint16_t) (b_pump     ? 1 : 0) << 7;
+  flags |= (uint16_t) (b_jets     ? 1 : 0) << 8;
+  flags |= (uint16_t) (b_light    ? 1 : 0) << 9;
+
+  // Publish display text if changed
+  if (this->display_text_ != nullptr) {
+    if (strncmp(this->last_display_, disp, 4) != 0) {
+      this->display_text_->publish_state(disp);
+      strncpy(this->last_display_, disp, 4);
+      this->last_display_[4] = '\0';
+    }
+  }
+
+  // Publish temperature if changed
   if (this->water_temp_ != nullptr && temp_f != this->last_temp_f_) {
     this->water_temp_->publish_state((float) temp_f);
     this->last_temp_f_ = temp_f;
   }
 
-  // Publish flags matching decoder.js bit mapping :contentReference[oaicite:3]{index=3}
-  if (this->heating_ != nullptr) {
-    this->heating_->publish_state(this->get_bit1_(40) == 1);
-  }
-  if (this->standard_mode_ != nullptr) {
-    // bit 60: 0=Economy, 1=Standard
-    this->standard_mode_->publish_state(this->get_bit1_(60) == 1);
-  }
+  // Publish binary flags only when any flag changes
+  if (!this->last_flags_valid_ || flags != this->last_flags_) {
+    this->last_flags_valid_ = true;
+    this->last_flags_ = flags;
 
-  // Optional: uncomment for debugging
-  // ESP_LOGD(TAG, "disp='%s' inv=%d temp=%d heat=%d mode=%d",
-  //          disp, inverted ? 1 : 0, temp_f, get_bit1_(40), get_bit1_(60));
+    if (this->inverted_ != nullptr) this->inverted_->publish_state(b_inverted);
+    if (this->set_heat_ != nullptr) this->set_heat_->publish_state(b_set_heat);
+    if (this->mode_standard_ != nullptr) this->mode_standard_->publish_state(b_mode_std);
+    if (this->heating_ != nullptr) this->heating_->publish_state(b_heating);
+    if (this->temp_up_display_ != nullptr) this->temp_up_display_->publish_state(b_temp_up);
+    if (this->temp_down_display_ != nullptr) this->temp_down_display_->publish_state(b_temp_dn);
+    if (this->blower_ != nullptr) this->blower_->publish_state(b_blower);
+    if (this->pump_ != nullptr) this->pump_->publish_state(b_pump);
+    if (this->jets_ != nullptr) this->jets_->publish_state(b_jets);
+    if (this->light_ != nullptr) this->light_->publish_state(b_light);
+  }
 }
 
 void Balboa9800CP::loop() {
