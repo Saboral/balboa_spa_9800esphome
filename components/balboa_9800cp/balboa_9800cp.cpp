@@ -24,7 +24,7 @@ void Balboa9800CP::set_pins(GPIOPin *clk, GPIOPin *data, GPIOPin *ctrl_in, GPIOP
 }
 
 void Balboa9800CP::dump_config() {
-  ESP_LOGCONFIG(TAG, "Balboa 9800CP:");
+  ESP_LOGCONFIG(TAG, "Balboa 9800CP (Step 1 RAW logger):");
   ESP_LOGCONFIG(TAG, "  clk_gpio: %d", this->clk_gpio_);
   ESP_LOGCONFIG(TAG, "  data_gpio: %d", this->data_gpio_);
   ESP_LOGCONFIG(TAG, "  ctrl_in_gpio: %d", this->ctrl_in_gpio_);
@@ -34,42 +34,42 @@ void Balboa9800CP::dump_config() {
 }
 
 void Balboa9800CP::setup() {
-  ESP_LOGW(TAG, "setup() reached");
+  ESP_LOGI(TAG, "setup() reached");
   instance_ = this;
 
-  // Safe outside ISR
+  // Safe outside ISR: allow ESPHome to configure pins too
   if (this->clk_) this->clk_->setup();
   if (this->data_) this->data_->setup();
   if (this->ctrl_in_) this->ctrl_in_->setup();
   if (this->ctrl_out_) this->ctrl_out_->setup();
 
+  // Require raw GPIO numbers for ISR-safe reads/writes
   if (this->clk_gpio_ < 0 || this->data_gpio_ < 0 || this->ctrl_in_gpio_ < 0 || this->ctrl_out_gpio_ < 0) {
-    ESP_LOGE(TAG, "GPIO numbers not set correctly. clk=%d data=%d ctrl_in=%d ctrl_out=%d",
+    ESP_LOGE(TAG, "GPIO numbers not set. clk=%d data=%d ctrl_in=%d ctrl_out=%d",
              this->clk_gpio_, this->data_gpio_, this->ctrl_in_gpio_, this->ctrl_out_gpio_);
     return;
   }
 
-  // Configure CLK interrupt via ESP-IDF
+  // Configure pins via ESP-IDF
   gpio_num_t clk = (gpio_num_t) this->clk_gpio_;
+  gpio_num_t data = (gpio_num_t) this->data_gpio_;
+  gpio_num_t ctrl_in = (gpio_num_t) this->ctrl_in_gpio_;
+  gpio_num_t ctrl_out = (gpio_num_t) this->ctrl_out_gpio_;
+
   gpio_reset_pin(clk);
   gpio_set_direction(clk, GPIO_MODE_INPUT);
   gpio_set_intr_type(clk, GPIO_INTR_ANYEDGE);
 
-  // Ensure DATA and CTRL_IN are inputs
-  gpio_num_t data = (gpio_num_t) this->data_gpio_;
   gpio_reset_pin(data);
   gpio_set_direction(data, GPIO_MODE_INPUT);
 
-  gpio_num_t ctrl_in = (gpio_num_t) this->ctrl_in_gpio_;
   gpio_reset_pin(ctrl_in);
   gpio_set_direction(ctrl_in, GPIO_MODE_INPUT);
 
-  // ctrl_out starts HIGH-Z
-  gpio_num_t ctrl_out = (gpio_num_t) this->ctrl_out_gpio_;
+  // ctrl_out starts high-Z (safe resistor-only injection)
   gpio_reset_pin(ctrl_out);
   gpio_set_direction(ctrl_out, GPIO_MODE_INPUT);
 
-  // Install ISR service once
   static bool installed = false;
   if (!installed) {
     esp_err_t e = gpio_install_isr_service(ESP_INTR_FLAG_IRAM);
@@ -92,13 +92,14 @@ void Balboa9800CP::setup() {
   this->last_edge_us_ = micros();
   this->isr_edge_count_ = 0;
 
-  ESP_LOGI(TAG, "ISR attached. clk=%d data=%d ctrl_in=%d ctrl_out=%d gap_us=%u",
-           this->clk_gpio_, this->data_gpio_, this->ctrl_in_gpio_, this->ctrl_out_gpio_,
-           (unsigned) this->gap_us_);
+  ESP_LOGI(TAG, "ISR attached. clk=%d data=%d ctrl_in=%d ctrl_out=%d",
+           this->clk_gpio_, this->data_gpio_, this->ctrl_in_gpio_, this->ctrl_out_gpio_);
 }
 
 void IRAM_ATTR Balboa9800CP::isr_router_() {
-  if (Balboa9800CP::instance_ != nullptr) Balboa9800CP::instance_->on_clock_edge_();
+  if (Balboa9800CP::instance_ != nullptr) {
+    Balboa9800CP::instance_->on_clock_edge_();
+  }
 }
 
 void IRAM_ATTR Balboa9800CP::on_clock_edge_() {
@@ -108,18 +109,20 @@ void IRAM_ATTR Balboa9800CP::on_clock_edge_() {
   const uint32_t dt = now - this->last_edge_us_;
   this->last_edge_us_ = now;
 
+  // Frame boundary detection
   if (dt > this->gap_us_) this->bit_index_ = 0;
 
   const int i = this->bit_index_;
   if (i < 0 || i >= 76) return;
 
-  // Read raw levels (ISR-safe)
+  // Capture DATA bit (ISR-safe)
   const uint8_t data_bit = (uint8_t) gpio_get_level((gpio_num_t) this->data_gpio_);
   this->bits_[i] = data_bit ? 1 : 0;
 
+  // Default CTRL pass-through
   uint8_t out = (uint8_t) gpio_get_level((gpio_num_t) this->ctrl_in_gpio_);
 
-  // Optional injection logic (same as before)
+  // Injection (same codes as your previous implementation)
   if ((this->frames_left_ > 0 || this->release_frame_) && i >= 72) {
     uint8_t pattern = 0b0000;
 
@@ -130,13 +133,15 @@ void IRAM_ATTR Balboa9800CP::on_clock_edge_() {
         case 3: pattern = 0b1000; break;  // Mode
         default: pattern = 0b0000; break;
       }
+    } else {
+      pattern = 0b0000;
     }
 
-    const int bitpos = i - 72;
-    out = (pattern >> (3 - bitpos)) & 0x1;
+    const int bitpos = i - 72;              // 0..3
+    out = (pattern >> (3 - bitpos)) & 0x1;  // MSB first
   }
 
-  // Safe open-drain/high-Z
+  // Open-drain/high-Z behavior on ctrl_out
   gpio_num_t ctrl_out = (gpio_num_t) this->ctrl_out_gpio_;
   if (out == 0) {
     gpio_set_direction(ctrl_out, GPIO_MODE_OUTPUT);
@@ -152,6 +157,7 @@ void IRAM_ATTR Balboa9800CP::on_clock_edge_() {
     this->frame_ready_ = true;
     portEXIT_CRITICAL_ISR(&balboa_mux);
 
+    // Press bookkeeping
     if (this->frames_left_ > 0) {
       this->frames_left_--;
       if (this->frames_left_ == 0) this->release_frame_ = true;
@@ -169,16 +175,17 @@ void Balboa9800CP::queue_command(uint8_t cmd) {
 }
 
 void Balboa9800CP::loop() {
-  // 1 Hz: prove ISR activity
+  // 1 Hz: show interrupt activity
   static uint32_t last_ms = 0;
-  uint32_t now = millis();
+  const uint32_t now = millis();
   if (now - last_ms >= 1000) {
     last_ms = now;
-    uint32_t edges = this->isr_edge_count_;
+    const uint32_t edges = this->isr_edge_count_;
     this->isr_edge_count_ = 0;
     ESP_LOGD(TAG, "clk edges/sec=%u bit_index=%d", (unsigned) edges, this->bit_index_);
   }
 
+  // Consume completed frames and print RAW bits
   bool ready = false;
   portENTER_CRITICAL(&balboa_mux);
   ready = this->frame_ready_;
@@ -187,7 +194,6 @@ void Balboa9800CP::loop() {
 
   if (!ready) return;
 
-  // Copy and print raw bits
   uint8_t local_bits[76];
   portENTER_CRITICAL(&balboa_mux);
   for (int i = 0; i < 76; i++) local_bits[i] = this->bits_[i];
@@ -199,6 +205,9 @@ void Balboa9800CP::loop() {
 
   ESP_LOGD(TAG, "RAW frame: %s", raw);
 }
+
+// Not used in Step-1 RAW logger build, kept for later
+void Balboa9800CP::process_frame_() {}
 
 }  // namespace balboa_9800cp
 }  // namespace esphome
