@@ -3,6 +3,8 @@ import esphome.config_validation as cv
 from esphome import pins
 from esphome.const import CONF_ID
 
+CODEOWNERS = ["@Saboral"]
+
 balboa_ns = cg.esphome_ns.namespace("balboa_9800cp")
 Balboa9800CP = balboa_ns.class_("Balboa9800CP", cg.Component)
 
@@ -13,18 +15,20 @@ CONF_CTRL_OUT_PIN = "ctrl_out_pin"
 CONF_GAP_US = "gap_us"
 CONF_PRESS_FRAMES = "press_frames"
 
-CONFIG_SCHEMA = cv.Schema(
-    {
-        cv.GenerateID(): cv.declare_id(Balboa9800CP),
-        cv.Required(CONF_CLK_PIN): pins.gpio_input_pin_schema,
-        cv.Required(CONF_DATA_PIN): pins.gpio_input_pin_schema,
-        cv.Required(CONF_CTRL_IN_PIN): pins.gpio_input_pin_schema,
-        cv.Required(CONF_CTRL_OUT_PIN): pins.gpio_output_pin_schema,
-        cv.Optional(CONF_GAP_US, default=8000): cv.int_range(min=1000, max=50000),
-        cv.Optional(CONF_PRESS_FRAMES, default=6): cv.int_range(min=1, max=30),
-    }
-).extend(cv.COMPONENT_SCHEMA)
-
+CONFIG_SCHEMA = (
+    cv.Schema(
+        {
+            cv.GenerateID(): cv.declare_id(Balboa9800CP),
+            cv.Required(CONF_CLK_PIN): pins.gpio_input_pin_schema,
+            cv.Required(CONF_DATA_PIN): pins.gpio_input_pin_schema,
+            cv.Required(CONF_CTRL_IN_PIN): pins.gpio_input_pin_schema,
+            cv.Required(CONF_CTRL_OUT_PIN): pins.gpio_output_pin_schema,
+            cv.Optional(CONF_GAP_US, default=8000): cv.int_range(min=1000, max=50000),
+            cv.Optional(CONF_PRESS_FRAMES, default=6): cv.int_range(min=1, max=30),
+        }
+    )
+    .extend(cv.COMPONENT_SCHEMA)
+)
 
 async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
