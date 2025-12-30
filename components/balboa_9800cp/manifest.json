@@ -1,0 +1,9 @@
+{
+  "domain": "balboa_9800cp",
+  "name": "Balboa 9800CP (SpaBerry-style bus)",
+  "version": "0.1.0",
+  "documentation": "https://github.com/YOURNAME/esphome-balboa-9800cp",
+  "dependencies": [],
+  "codeowners": ["Saboral"],
+  "requirements": []
+}
