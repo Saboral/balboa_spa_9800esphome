@@ -29,6 +29,11 @@ class BalboaButton : public button::Button {
 class Balboa9800CP : public Component {
  public:
   void set_pins(GPIOPin *clk, GPIOPin *data, GPIOPin *ctrl_in, GPIOPin *ctrl_out);
+  void set_gpio_numbers(int clk_gpio, int ctrl_out_gpio) {
+    this->clk_gpio_ = clk_gpio;
+    this->ctrl_out_gpio_ = ctrl_out_gpio;
+  }
+
   void set_gap_us(uint32_t gap) { this->gap_us_ = gap; }
   void set_press_frames(uint8_t n) { this->press_frames_ = n; }
 
@@ -54,11 +59,10 @@ class Balboa9800CP : public Component {
 
  protected:
   static void IRAM_ATTR isr_router_();
-  // NOTE: keep IRAM_ATTR only on the definition in .cpp to avoid section conflicts
-  void on_clock_edge_();
+  void IRAM_ATTR on_clock_edge_();
   void process_frame_();
 
-  // decoder.js helpers
+  // decoder.js helpers (ported directly)
   int get_bit1_(int bit_1_index) const;  // 1..76
   char decode_digit_(uint8_t seg, bool inverted) const;
   void decode_display_(char out[5], bool &inverted) const;
@@ -68,6 +72,10 @@ class Balboa9800CP : public Component {
   GPIOPin *data_{nullptr};
   GPIOPin *ctrl_in_{nullptr};
   GPIOPin *ctrl_out_{nullptr};
+
+  // Raw GPIO numbers (passed from YAML)
+  int clk_gpio_{-1};
+  int ctrl_out_gpio_{-1};
 
   // Captured 76 bits from DATA line (board->topside)
   volatile uint8_t bits_[76]{0};
