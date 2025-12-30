@@ -60,7 +60,7 @@ class Balboa9800CP : public Component {
 
  protected:
   static void IRAM_ATTR isr_router_();
-  void IRAM_ATTR on_clock_edge_();
+  void on_clock_edge_();
   void process_frame_();
 
   // decoder helpers (ported mapping)
