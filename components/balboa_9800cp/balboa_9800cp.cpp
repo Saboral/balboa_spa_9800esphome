@@ -48,7 +48,8 @@ void Balboa9800CP::setup() {
   ESP_LOGI(TAG, "setup() entered");
   instance_ = this;
 
-  // this->clk_->setup();
+  // Normal ESPHome pin setup
+  this->clk_->setup();
   this->data_->setup();
   this->ctrl_in_->setup();
   this->ctrl_out_->setup();
@@ -62,10 +63,19 @@ void Balboa9800CP::setup() {
 
   // Ensure clock pin is input and attach interrupt on raw GPIO
   pinMode(this->clk_gpio_, INPUT);
+
+  // CHANGE is more tolerant of non-ideal clock edges
   attachInterrupt(digitalPinToInterrupt(this->clk_gpio_), Balboa9800CP::isr_router_, CHANGE);
 
   // SAFE resistor-only injection: start ctrl_out as high-Z (INPUT)
   pinMode(this->ctrl_out_gpio_, INPUT);
+
+  // Reset capture state
+  this->bit_index_ = 0;
+  this->frame_ready_ = false;
+  this->last_edge_us_ = micros();
+  this->isr_count_ = 0;
+  this->last_report_ms_ = millis();
 
   ESP_LOGI(TAG, "Started (gap_us=%u press_frames=%u) clk_gpio=%d ctrl_out_gpio=%d",
            static_cast<unsigned>(this->gap_us_), static_cast<unsigned>(this->press_frames_),
@@ -82,6 +92,9 @@ void IRAM_ATTR Balboa9800CP::isr_router_() {
 }
 
 void IRAM_ATTR Balboa9800CP::on_clock_edge_() {
+  // Count ISR hits (diagnostic)
+  this->isr_count_++;
+
   const uint32_t now = micros();
   const uint32_t dt = now - this->last_edge_us_;
   this->last_edge_us_ = now;
@@ -314,9 +327,6 @@ void Balboa9800CP::process_frame_() {
       strncpy(this->last_display_, disp, 4);
       this->last_display_[4] = '\0';
     }
-    
-  ESP_LOGV(TAG, "Frame ready");
-
   }
 
   // Publish temperature if changed
@@ -344,7 +354,18 @@ void Balboa9800CP::process_frame_() {
 }
 
 void Balboa9800CP::loop() {
+  // 1 Hz diagnostic report (safe, non-ISR logging)
+  const uint32_t now = millis();
+  if (now - this->last_report_ms_ >= 1000) {
+    this->last_report_ms_ = now;
+    ESP_LOGI(TAG, "ISR count=%lu bit_index=%d frame_ready=%d",
+             static_cast<unsigned long>(this->isr_count_),
+             this->bit_index_,
+             this->frame_ready_ ? 1 : 0);
+  }
+
   if (!this->frame_ready_) return;
+
   this->frame_ready_ = false;
   this->process_frame_();
 }
