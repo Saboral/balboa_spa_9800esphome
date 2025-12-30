@@ -22,7 +22,11 @@ CONFIG_SCHEMA = (
             cv.Required(CONF_CLK_PIN): pins.gpio_input_pin_schema,
             cv.Required(CONF_DATA_PIN): pins.gpio_input_pin_schema,
             cv.Required(CONF_CTRL_IN_PIN): pins.gpio_input_pin_schema,
+
+            # IMPORTANT: Treat ctrl_out as an INPUT pin schema so ESPHome doesn't drive it at boot.
+            # We control it manually via pinMode() for safe open-drain/high-Z injection.
             cv.Required(CONF_CTRL_OUT_PIN): pins.gpio_input_pin_schema,
+
             cv.Optional(CONF_GAP_US, default=8000): cv.int_range(min=1000, max=50000),
             cv.Optional(CONF_PRESS_FRAMES, default=6): cv.int_range(min=1, max=30),
         }
@@ -41,7 +45,7 @@ async def to_code(config):
 
     cg.add(var.set_pins(clk, data, cin, cout))
 
-    # Pass raw GPIO numbers for interrupt + open-drain injection (ESP32/Arduino attachInterrupt)
+    # Pass raw GPIO numbers for Arduino attachInterrupt and open-drain injection
     cg.add(var.set_gpio_numbers(config[CONF_CLK_PIN][CONF_NUMBER],
                                 config[CONF_CTRL_OUT_PIN][CONF_NUMBER]))
 
