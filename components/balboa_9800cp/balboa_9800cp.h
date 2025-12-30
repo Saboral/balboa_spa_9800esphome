@@ -3,10 +3,10 @@
 #include "esphome/core/component.h"
 #include "esphome/core/gpio.h"
 
-#include "esphome/components/sensor/sensor.h"
-#include "esphome/components/text_sensor/text_sensor.h"
 #include "esphome/components/binary_sensor/binary_sensor.h"
 #include "esphome/components/button/button.h"
+#include "esphome/components/sensor/sensor.h"
+#include "esphome/components/text_sensor/text_sensor.h"
 
 namespace esphome {
 namespace balboa_9800cp {
@@ -28,13 +28,14 @@ class BalboaButton : public button::Button {
 
 class Balboa9800CP : public Component {
  public:
-  void dump_config() override;
+  // Wiring
   void set_pins(GPIOPin *clk, GPIOPin *data, GPIOPin *ctrl_in, GPIOPin *ctrl_out);
   void set_gpio_numbers(int clk_gpio, int ctrl_out_gpio) {
     this->clk_gpio_ = clk_gpio;
     this->ctrl_out_gpio_ = ctrl_out_gpio;
   }
 
+  // Timing / behavior
   void set_gap_us(uint32_t gap) { this->gap_us_ = gap; }
   void set_press_frames(uint8_t n) { this->press_frames_ = n; }
 
@@ -53,28 +54,33 @@ class Balboa9800CP : public Component {
   void set_jets_sensor(binary_sensor::BinarySensor *s) { this->jets_ = s; }
   void set_light_sensor(binary_sensor::BinarySensor *s) { this->light_ = s; }
 
+  // ESPHome lifecycle
   void setup() override;
   void loop() override;
+  void dump_config() override;
 
+  // Command injection
   void queue_command(uint8_t cmd);
 
  protected:
+  // ISR trampoline + handler
   static void IRAM_ATTR isr_router_();
-  void on_clock_edge_();
+  void on_clock_edge_();  // IRAM_ATTR should be on the .cpp definition only
   void process_frame_();
 
-  // decoder helpers (ported mapping)
+  // Decoder helpers (ported mapping)
   int get_bit1_(int bit_1_index) const;  // 1..76
   char decode_digit_(uint8_t seg, bool inverted) const;
   void decode_display_(char out[5], bool &inverted) const;
   int convert_temp_(const char *disp) const;
 
+  // Pins (ESPHome abstractions)
   GPIOPin *clk_{nullptr};
   GPIOPin *data_{nullptr};
   GPIOPin *ctrl_in_{nullptr};
   GPIOPin *ctrl_out_{nullptr};
 
-  // Raw GPIO numbers (passed from YAML)
+  // Raw GPIO numbers (passed from YAML) used for attachInterrupt + open-drain injection
   int clk_gpio_{-1};
   int ctrl_out_gpio_{-1};
 
@@ -84,15 +90,21 @@ class Balboa9800CP : public Component {
   volatile int bit_index_{0};
   volatile bool frame_ready_{false};
 
+  // Frame boundary + button press duration
   uint32_t gap_us_{8000};
   uint8_t press_frames_{6};
 
   // CTRL last-4-bit injection state
-  volatile uint8_t pending_cmd_{0};   // 1=Up, 2=Down, 3=Mode
+  volatile uint8_t pending_cmd_{0};  // 1=Up, 2=Down, 3=Mode
   volatile uint8_t frames_left_{0};
   volatile bool release_frame_{false};
 
+  // Global instance pointer for ISR trampoline
   static Balboa9800CP *instance_;
+
+  // ---- Fix #3: ISR diagnostic counters (reported from loop() once per second) ----
+  volatile uint32_t isr_count_{0};
+  uint32_t last_report_ms_{0};
 
   // Entity pointers
   sensor::Sensor *water_temp_{nullptr};
@@ -113,7 +125,7 @@ class Balboa9800CP : public Component {
   int last_temp_f_{-999};
   uint16_t last_flags_{0};
   bool last_flags_valid_{false};
-  char last_display_[5] = {'\0','\0','\0','\0','\0'};
+  char last_display_[5] = {'\0', '\0', '\0', '\0', '\0'};
 };
 
 }  // namespace balboa_9800cp
