@@ -28,6 +28,7 @@ class BalboaButton : public button::Button {
 
 class Balboa9800CP : public Component {
  public:
+  void dump_config() override;
   void set_pins(GPIOPin *clk, GPIOPin *data, GPIOPin *ctrl_in, GPIOPin *ctrl_out);
   void set_gpio_numbers(int clk_gpio, int ctrl_out_gpio) {
     this->clk_gpio_ = clk_gpio;
