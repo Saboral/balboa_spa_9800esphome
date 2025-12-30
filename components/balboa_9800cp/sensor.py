@@ -1,38 +1,22 @@
 import esphome.codegen as cg
 import esphome.config_validation as cv
-from esphome import pins
-from esphome.const import CONF_ID, DEVICE_CLASS_TEMPERATURE, UNIT_CELSIUS, STATE_CLASS_MEASUREMENT
+from esphome.components import sensor
+from esphome.const import (
+    CONF_ID,
+    DEVICE_CLASS_TEMPERATURE,
+    UNIT_CELSIUS,
+    STATE_CLASS_MEASUREMENT,
+)
 
-balboa_ns = cg.esphome_ns.namespace("balboa_9800cp")
-Balboa9800CP = balboa_ns.class_("Balboa9800CP", cg.Component)
+from . import Balboa9800CP
 
-CONF_CLK_PIN = "clk_pin"
-CONF_DATA_PIN = "data_pin"
-CONF_CTRL_IN_PIN = "ctrl_in_pin"
-CONF_CTRL_OUT_PIN = "ctrl_out_pin"
-CONF_FRAME_BITS = "frame_bits"
-CONF_GAP_US = "gap_us"
-CONF_PRESS_FRAMES = "press_frames"
-
+CONF_BALBOA_ID = "balboa_id"
 CONF_WATER_TEMP = "water_temp"
 
 CONFIG_SCHEMA = cv.Schema(
     {
-        cv.GenerateID(): cv.declare_id(Balboa9800CP),
-        cv.Required(CONF_CLK_PIN): pins.gpio_input_pin_schema,
-        cv.Required(CONF_DATA_PIN): pins.gpio_input_pin_schema,
-        cv.Required(CONF_CTRL_IN_PIN): pins.gpio_input_pin_schema,
-        cv.Required(CONF_CTRL_OUT_PIN): pins.gpio_output_pin_schema,
-        cv.Optional(CONF_FRAME_BITS, default=76): cv.int_range(min=32, max=128),
-        cv.Optional(CONF_GAP_US, default=8000): cv.int_range(min=1000, max=50000),
-        cv.Optional(CONF_PRESS_FRAMES, default=6): cv.int_range(min=1, max=30),
-    }
-).extend(cv.COMPONENT_SCHEMA)
-
-WATER_TEMP_SCHEMA = cv.Schema(
-    {
-        cv.GenerateID(): cv.declare_id(Balboa9800CP),
-        cv.Optional(CONF_WATER_TEMP): cv.sensor_schema(
+        cv.GenerateID(CONF_BALBOA_ID): cv.use_id(Balboa9800CP),
+        cv.Required(CONF_WATER_TEMP): sensor.sensor_schema(
             unit_of_measurement=UNIT_CELSIUS,
             accuracy_decimals=0,
             device_class=DEVICE_CLASS_TEMPERATURE,
@@ -41,24 +25,7 @@ WATER_TEMP_SCHEMA = cv.Schema(
     }
 )
 
-# The platform sensor config references the same component ID created above.
-PLATFORM_SCHEMA = WATER_TEMP_SCHEMA
-
 async def to_code(config):
-    var = cg.new_Pvariable(config[CONF_ID])
-    await cg.register_component(var, config)
-
-    clk = await cg.gpio_pin_expression(config[CONF_CLK_PIN])
-    data = await cg.gpio_pin_expression(config[CONF_DATA_PIN])
-    cin = await cg.gpio_pin_expression(config[CONF_CTRL_IN_PIN])
-    cout = await cg.gpio_pin_expression(config[CONF_CTRL_OUT_PIN])
-
-    cg.add(var.set_pins(clk, data, cin, cout))
-    cg.add(var.set_frame_bits(config[CONF_FRAME_BITS]))
-    cg.add(var.set_gap_us(config[CONF_GAP_US]))
-    cg.add(var.set_press_frames(config[CONF_PRESS_FRAMES]))
-
-    # Optional sensor
-    if CONF_WATER_TEMP in config and config[CONF_WATER_TEMP] is not None:
-      sens = await cg.new_sensor(config[CONF_WATER_TEMP])
-      cg.add(var.set_water_temp_sensor(sens))
+    parent = await cg.get_variable(config[CONF_BALBOA_ID])
+    sens = await sensor.new_sensor(config[CONF_WATER_TEMP])
+    cg.add(parent.set_water_temp_sensor(sens))
