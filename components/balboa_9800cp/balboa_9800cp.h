@@ -2,7 +2,9 @@
 
 #include "esphome/core/component.h"
 #include "esphome/core/gpio.h"
+
 #include "esphome/components/sensor/sensor.h"
+#include "esphome/components/text_sensor/text_sensor.h"
 #include "esphome/components/binary_sensor/binary_sensor.h"
 #include "esphome/components/button/button.h"
 
@@ -30,9 +32,20 @@ class Balboa9800CP : public Component {
   void set_gap_us(uint32_t gap) { this->gap_us_ = gap; }
   void set_press_frames(uint8_t n) { this->press_frames_ = n; }
 
+  // Entities
   void set_water_temp_sensor(sensor::Sensor *s) { this->water_temp_ = s; }
+  void set_display_text_sensor(text_sensor::TextSensor *s) { this->display_text_ = s; }
+
+  void set_inverted_sensor(binary_sensor::BinarySensor *s) { this->inverted_ = s; }
+  void set_set_heat_sensor(binary_sensor::BinarySensor *s) { this->set_heat_ = s; }
+  void set_mode_standard_sensor(binary_sensor::BinarySensor *s) { this->mode_standard_ = s; }
   void set_heating_sensor(binary_sensor::BinarySensor *s) { this->heating_ = s; }
-  void set_standard_mode_sensor(binary_sensor::BinarySensor *s) { this->standard_mode_ = s; }
+  void set_temp_up_display_sensor(binary_sensor::BinarySensor *s) { this->temp_up_display_ = s; }
+  void set_temp_down_display_sensor(binary_sensor::BinarySensor *s) { this->temp_down_display_ = s; }
+  void set_blower_sensor(binary_sensor::BinarySensor *s) { this->blower_ = s; }
+  void set_pump_sensor(binary_sensor::BinarySensor *s) { this->pump_ = s; }
+  void set_jets_sensor(binary_sensor::BinarySensor *s) { this->jets_ = s; }
+  void set_light_sensor(binary_sensor::BinarySensor *s) { this->light_ = s; }
 
   void setup() override;
   void loop() override;
@@ -42,24 +55,21 @@ class Balboa9800CP : public Component {
  protected:
   static void IRAM_ATTR isr_router_();
   void IRAM_ATTR on_clock_edge_();
-
   void process_frame_();
 
-  // Mirrors decoder.js :contentReference[oaicite:1]{index=1}
+  // decoder.js helpers (ported directly) :contentReference[oaicite:1]{index=1}
+  int get_bit1_(int bit_1_index) const;  // 1..76
   char decode_digit_(uint8_t seg, bool inverted) const;
   void decode_display_(char out[5], bool &inverted) const;
   int convert_temp_(const char *disp) const;
-
-  int get_bit1_(int bit_1_index) const;  // 1..76 -> 0/1
 
   GPIOPin *clk_{nullptr};
   GPIOPin *data_{nullptr};
   GPIOPin *ctrl_in_{nullptr};
   GPIOPin *ctrl_out_{nullptr};
 
-  // 76 bits captured from DATA line (board->topside)
+  // Captured 76 bits from DATA line (board->topside)
   volatile uint8_t bits_[76]{0};
-
   volatile uint32_t last_edge_us_{0};
   volatile int bit_index_{0};
   volatile bool frame_ready_{false};
@@ -67,19 +77,33 @@ class Balboa9800CP : public Component {
   uint32_t gap_us_{8000};
   uint8_t press_frames_{6};
 
-  // Controls injection state
-  volatile uint8_t pending_cmd_{0};         // 0=none, 1=up, 2=down, 3=mode
+  // CTRL last-4-bit injection state
+  volatile uint8_t pending_cmd_{0};   // 1=Up, 2=Down, 3=Mode
   volatile uint8_t frames_left_{0};
   volatile bool release_frame_{false};
 
   static Balboa9800CP *instance_;
 
-  // Entities
+  // Entity pointers
   sensor::Sensor *water_temp_{nullptr};
-  binary_sensor::BinarySensor *heating_{nullptr};
-  binary_sensor::BinarySensor *standard_mode_{nullptr};
+  text_sensor::TextSensor *display_text_{nullptr};
 
+  binary_sensor::BinarySensor *inverted_{nullptr};
+  binary_sensor::BinarySensor *set_heat_{nullptr};
+  binary_sensor::BinarySensor *mode_standard_{nullptr};
+  binary_sensor::BinarySensor *heating_{nullptr};
+  binary_sensor::BinarySensor *temp_up_display_{nullptr};
+  binary_sensor::BinarySensor *temp_down_display_{nullptr};
+  binary_sensor::BinarySensor *blower_{nullptr};
+  binary_sensor::BinarySensor *pump_{nullptr};
+  binary_sensor::BinarySensor *jets_{nullptr};
+  binary_sensor::BinarySensor *light_{nullptr};
+
+  // Change suppression
   int last_temp_f_{-999};
+  uint16_t last_flags_{0};
+  bool last_flags_valid_{false};
+  char last_display_[5] = {'\0','\0','\0','\0','\0'};
 };
 
 }  // namespace balboa_9800cp
