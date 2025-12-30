@@ -240,6 +240,11 @@ void Balboa9800CP::decode_display_(char out[5], bool &inverted) const {
     digit[d] = v;
   }
 
+  // ---- STEP 1 DEBUG: log raw segment bytes (shows actual 7-seg patterns) ----
+  // Use DEBUG level so it shows up even if tag level is DEBUG (your current config).
+  ESP_LOGD(TAG, "RAW segments: %02X %02X %02X %02X inv_flag=%d",
+           digit[0], digit[1], digit[2], digit[3], inverted ? 1 : 0);
+
   const char normal[4] = {
       this->decode_digit_(digit[3], false),
       this->decode_digit_(digit[2], false),
