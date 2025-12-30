@@ -8,6 +8,11 @@
 namespace esphome {
 namespace balboa_9800cp {
 
+Balboa9800CP *Balboa9800CP::instance_ = nullptr;
+
+}  // namespace balboa_9800cp
+}  // namespace esphome
+
 static const char *const TAG = "balboa_9800cp";
 
 void Balboa9800CP::dump_config() {
