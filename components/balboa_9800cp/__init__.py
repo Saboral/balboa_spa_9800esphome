@@ -1,7 +1,7 @@
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome import pins
-from esphome.const import CONF_ID
+from esphome.const import CONF_ID, CONF_NUMBER
 
 CODEOWNERS = ["@Saboral"]
 
@@ -40,5 +40,10 @@ async def to_code(config):
     cout = await cg.gpio_pin_expression(config[CONF_CTRL_OUT_PIN])
 
     cg.add(var.set_pins(clk, data, cin, cout))
+
+    # Pass raw GPIO numbers for interrupt + open-drain injection (ESP32/Arduino attachInterrupt)
+    cg.add(var.set_gpio_numbers(config[CONF_CLK_PIN][CONF_NUMBER],
+                                config[CONF_CTRL_OUT_PIN][CONF_NUMBER]))
+
     cg.add(var.set_gap_us(config[CONF_GAP_US]))
     cg.add(var.set_press_frames(config[CONF_PRESS_FRAMES]))
