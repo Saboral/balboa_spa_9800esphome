@@ -1,11 +1,7 @@
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome.components import sensor
-from esphome.const import (
-    DEVICE_CLASS_TEMPERATURE,
-    STATE_CLASS_MEASUREMENT,
-    UNIT_FAHRENHEIT,
-)
+from esphome.const import DEVICE_CLASS_TEMPERATURE, STATE_CLASS_MEASUREMENT, UNIT_FAHRENHEIT
 
 from . import Balboa9800CP
 
@@ -26,5 +22,5 @@ CONFIG_SCHEMA = cv.Schema(
 
 async def to_code(config):
     parent = await cg.get_variable(config[CONF_BALBOA_ID])
-    sens = await sensor.new_sensor(config[CONF_WATER_TEMP_F])
-    cg.add(parent.set_water_temp_sensor(sens))
+    s = await sensor.new_sensor(config[CONF_WATER_TEMP_F])
+    cg.add(parent.set_water_temp_sensor(s))
