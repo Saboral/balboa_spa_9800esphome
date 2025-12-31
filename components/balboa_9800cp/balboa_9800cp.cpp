@@ -12,6 +12,10 @@ static const char *const TAG = "balboa_9800cp";
 Balboa9800CP *Balboa9800CP::instance_ = nullptr;
 static portMUX_TYPE balboa_mux = portMUX_INITIALIZER_UNLOCKED;
 
+// ---- NEW: cache last completed frame so we can always print once/sec ----
+static uint8_t last_frame_[76];
+static bool last_frame_valid_ = false;
+
 void BalboaButton::press_action() {
   if (this->parent_ != nullptr) this->parent_->queue_command(this->cmd_);
 }
@@ -84,10 +88,15 @@ void Balboa9800CP::setup() {
     return;
   }
 
+  // Reset capture + debug state
   this->bit_index_ = 0;
   this->frame_ready_ = false;
   this->last_edge_us_ = micros();
   this->isr_edge_count_ = 0;
+
+  // Reset cached frame
+  last_frame_valid_ = false;
+  for (int i = 0; i < 76; i++) last_frame_[i] = 0;
 
   ESP_LOGI(TAG, "ISR attached. clk=%d data=%d ctrl_in=%d ctrl_out=%d gap_us=%u",
            this->clk_gpio_, this->data_gpio_, this->ctrl_in_gpio_, this->ctrl_out_gpio_, (unsigned) this->gap_us_);
@@ -167,9 +176,10 @@ void Balboa9800CP::queue_command(uint8_t cmd) {
 }
 
 void Balboa9800CP::loop() {
+  const uint32_t now = millis();
+
   // 1 Hz ISR activity log
   static uint32_t last_edges_ms = 0;
-  const uint32_t now = millis();
   if (now - last_edges_ms >= 1000) {
     last_edges_ms = now;
     const uint32_t edges = this->isr_edge_count_;
@@ -177,28 +187,22 @@ void Balboa9800CP::loop() {
     ESP_LOGD(TAG, "clk edges/sec=%u bit_index=%d", (unsigned) edges, this->bit_index_);
   }
 
-  // Consume completed frames
-  bool ready = false;
+  // ---- NEW: if a frame completed, copy it into last_frame_ immediately ----
   portENTER_CRITICAL(&balboa_mux);
-  ready = this->frame_ready_;
-  if (ready) this->frame_ready_ = false;
+  if (this->frame_ready_) {
+    for (int i = 0; i < 76; i++) last_frame_[i] = this->bits_[i];
+    last_frame_valid_ = true;
+    this->frame_ready_ = false;
+  }
   portEXIT_CRITICAL(&balboa_mux);
 
-  if (!ready) return;
-
-  // ---- RAW OUTPUT FIX: print at most once per second ----
+  // ---- NEW: print cached frame once per second, regardless of frame_ready races ----
   static uint32_t last_raw_ms = 0;
-  if (now - last_raw_ms < 1000) return;
+  if (!last_frame_valid_ || (now - last_raw_ms) < 1000) return;
   last_raw_ms = now;
 
-  // Copy bits then print
-  uint8_t local_bits[76];
-  portENTER_CRITICAL(&balboa_mux);
-  for (int i = 0; i < 76; i++) local_bits[i] = this->bits_[i];
-  portEXIT_CRITICAL(&balboa_mux);
-
   char raw[77];
-  for (int i = 0; i < 76; i++) raw[i] = local_bits[i] ? '1' : '0';
+  for (int i = 0; i < 76; i++) raw[i] = last_frame_[i] ? '1' : '0';
   raw[76] = '\0';
 
   ESP_LOGD(TAG, "RAW frame: %s", raw);
