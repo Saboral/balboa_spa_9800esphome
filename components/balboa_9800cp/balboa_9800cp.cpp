@@ -114,8 +114,6 @@ void IRAM_ATTR Balboa9800CP::on_clock_edge_() {
   if (i < 0 || i >= 76) return;
 
   // Sample BOTH lines on the same clock edge:
-  // - display data (pin 5) into disp_bits_
-  // - control/button data (pin 3) into ctrl_bits_
   this->disp_bits_[i] = gpio_get_level((gpio_num_t) this->data_gpio_) ? 1 : 0;
   this->ctrl_bits_[i] = gpio_get_level((gpio_num_t) this->ctrl_in_gpio_) ? 1 : 0;
 
@@ -130,7 +128,7 @@ void IRAM_ATTR Balboa9800CP::on_clock_edge_() {
 
 void Balboa9800CP::queue_command(uint8_t cmd) {
   (void) cmd;
-  // Injection disabled in this Step-1 logger build
+  // Injection disabled in this Step-1 dual-stream logger build
 }
 
 void Balboa9800CP::loop() {
@@ -145,7 +143,7 @@ void Balboa9800CP::loop() {
     ESP_LOGD(TAG, "clk edges/sec=%u bit_index=%d", (unsigned) edges, this->bit_index_);
   }
 
-  // If a frame completed, cache it
+  // Cache latest completed frame
   portENTER_CRITICAL(&balboa_mux);
   if (this->frame_ready_) {
     for (int i = 0; i < 76; i++) {
@@ -157,7 +155,7 @@ void Balboa9800CP::loop() {
   }
   portEXIT_CRITICAL(&balboa_mux);
 
-  // Print once/sec if we have a frame cached
+  // Print once/sec
   static uint32_t last_print_ms = 0;
   if (!last_valid_ || (now - last_print_ms) < 1000) return;
   last_print_ms = now;
@@ -176,7 +174,7 @@ void Balboa9800CP::loop() {
 }
 
 void Balboa9800CP::process_frame_() {
-  // Not used in Step-1 logger build
+  // Not used in this logger build
 }
 
 }  // namespace balboa_9800cp
