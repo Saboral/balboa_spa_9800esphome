@@ -3,8 +3,6 @@
 
 #include <Arduino.h>
 #include "driver/gpio.h"
-#include <ctype.h>
-#include <string>
 
 namespace esphome {
 namespace balboa_9800cp {
@@ -14,108 +12,80 @@ static const char *const TAG = "balboa_9800cp";
 Balboa9800CP *Balboa9800CP::instance_ = nullptr;
 static portMUX_TYPE balboa_mux = portMUX_INITIALIZER_UNLOCKED;
 
-// ---- Protocol constants ----
-static constexpr int FRAME_BITS = 42;   // 6 chunks * 7 bits
+// Protocol observed: 42 bits = 6 chunks × 7 bits (LSB-first)
+static constexpr int FRAME_BITS = 42;
 static constexpr int CHUNK_BITS = 7;
 
-// Cache last completed frame (avoids ISR/main loop races)
-static uint8_t last_disp_[FRAME_BITS];
-static uint8_t last_ctrl_[FRAME_BITS];
+// Cache last completed frame (so loop never races ISR)
+static uint8_t last_disp_[76];
+static uint8_t last_ctrl_[76];
 static bool last_valid_ = false;
 
-// Track last STAT/EQ for diff logging
-static bool have_prev_stat_eq_ = false;
-static uint8_t prev_stat_ = 0;
-static uint8_t prev_eq_ = 0;
-
-// Track last published temp so HA keeps it even when display shows non-temp messages
-static bool have_last_temp_ = false;
-static float last_temp_f_ = NAN;
-
-// Pack 7 bits MSB-first from bit array: bits[start+0] becomes bit6 ... bits[start+6] becomes bit0
-static uint8_t pack7_msb(const uint8_t *bits, int start) {
+// ---- helpers ----
+static inline uint8_t bits_to_u7_lsb_first(const uint8_t *bits, int start_bit) {
   uint8_t v = 0;
-  for (int k = 0; k < 7; k++) {
-    v <<= 1;
-    v |= (bits[start + k] ? 1 : 0);
+  for (int k = 0; k < CHUNK_BITS; k++) {
+    if (bits[start_bit + k]) v |= (1U << k);
   }
   return v & 0x7F;
 }
 
-static std::string bits7(uint8_t v) {
-  std::string s;
-  s.reserve(7);
-  for (int i = 6; i >= 0; i--) s.push_back((v & (1 << i)) ? '1' : '0');
-  return s;
-}
+// Strict 7-seg mapping for *this wiring/protocol* (based on your captured chunks)
+// Unknown patterns return '?'
+static inline char seg7_to_char(uint8_t s) {
+  switch (s) {
+    // Digits seen and/or derived (many are bit-reverse of common 7seg, except '1' proved as 0x39 in your logs)
+    case 0x7E: return '0';
+    case 0x39: return '1';   // proven by your logs (D1=0x39 corresponds to leading '1')
+    case 0x6D: return '2';   // proven by your logs (D2=0x6D corresponds to '2' in 102F)
+    case 0x79: return '3';   // best-effort derived; will show '?' if wrong
+    case 0x33: return '4';   // best-effort derived
+    case 0x5B: return '5';   // best-effort derived (NOTE: NOT 0x6D)
+    case 0x5F: return '6';   // best-effort derived
+    case 0x70: return '7';   // best-effort derived
+    case 0x7F: return '8';   // best-effort derived (same both ways for many wirings)
+    case 0x7B: return '9';   // best-effort derived
 
-// ✅ Strict 7-seg decoder (no collisions). Patterns are masked to 7 bits.
-static char seg7_to_char(uint8_t pat7) {
-  switch (pat7 & 0x7F) {
-    // Digits for *your* 9800CP (based on observed frames)
-    case 0x06: return '1';
-    case 0x7E: return '0';   // observed behaving as 0
-    case 0x6D: return '2';   // observed behaving as 2 (not 5 on your panel)
+    // Units / letters (as observed: D4=0x06 is 'F' in your logs)
+    case 0x06: return 'F';
 
-    // Keep standard mappings we might still see
-    case 0x4F: return '3';
-    case 0x66: return '4';
-    case 0x7D: return '6';
-    case 0x07: return '7';
-    case 0x7F: return '8';
-    case 0x6F: return '9';
-
-    // Likely trailing unit glyph (often F) on your panel
-    case 0x39: return 'F';
-
-    case 0x40: return '-';
+    // Common extras (best-effort)
     case 0x00: return ' ';
+    case 0x40: return '-';
 
-    default:   return '?';
+    default: return '?';
   }
 }
 
+static inline bool parse_temp_f_from_display(const char *disp, float *out_f) {
+  // Expect formats like "102F", " 98F", etc.
+  // We’ll extract up to 3 digits before trailing 'F'.
+  if (!disp) return false;
 
+  int len = (int) strlen(disp);
+  if (len < 2) return false;
+  if (disp[len - 1] != 'F') return false;
 
-static bool looks_like_set_mode(const std::string &s) {
-  bool has_s = false, has_e = false, has_t = false;
-  for (char c : s) {
-    c = (char) toupper((int) c);
-    if (c == 'S') has_s = true;
-    if (c == 'E') has_e = true;
-    if (c == 'T') has_t = true;
+  int value = 0;
+  int digits = 0;
+  for (int i = 0; i < len - 1; i++) {
+    if (disp[i] >= '0' && disp[i] <= '9') {
+      value = value * 10 + (disp[i] - '0');
+      digits++;
+      if (digits >= 3) break;
+    }
   }
-  return has_s && has_e && has_t;
-}
-
-static bool parse_reasonable_temp_f(const std::string &s, int &out_temp) {
-  // Extract digits from the 4-char display.
-  int digits[4];
-  int n = 0;
-  for (char c : s) {
-    if (c >= '0' && c <= '9' && n < 4) digits[n++] = c - '0';
-  }
-  if (n < 2) return false;
-
-  int val = 0;
-  if (n == 2) val = digits[0] * 10 + digits[1];
-  else if (n == 3) val = digits[0] * 100 + digits[1] * 10 + digits[2];
-  else val = digits[0] * 1000 + digits[1] * 100 + digits[2] * 10 + digits[3];
-
-  // Typical spa water temps in F.
-  if (val < 50 || val > 120) return false;
-
-  out_temp = val;
+  if (digits == 0) return false;
+  *out_f = (float) value;
   return true;
 }
 
-// ---------------- Buttons ----------------
+// ---- Button ----
 void BalboaButton::press_action() {
-  if (this->parent_ != nullptr)
-    this->parent_->queue_command(this->cmd_);
+  if (this->parent_ != nullptr) this->parent_->queue_command(this->cmd_);
 }
 
-// ---------------- Component ----------------
+// ---- Component ----
 void Balboa9800CP::set_pins(GPIOPin *clk, GPIOPin *data, GPIOPin *ctrl_in, GPIOPin *ctrl_out) {
   this->clk_ = clk;
   this->data_ = data;
@@ -124,10 +94,10 @@ void Balboa9800CP::set_pins(GPIOPin *clk, GPIOPin *data, GPIOPin *ctrl_in, GPIOP
 }
 
 void Balboa9800CP::dump_config() {
-  ESP_LOGCONFIG(TAG, "Balboa 9800CP (strict seg7 + Pump1 bit):");
+  ESP_LOGCONFIG(TAG, "Balboa 9800CP (strict seg7 + Pump bits):");
   ESP_LOGCONFIG(TAG, "  clk_gpio: %d", this->clk_gpio_);
-  ESP_LOGCONFIG(TAG, "  display_data_gpio: %d", this->data_gpio_);
-  ESP_LOGCONFIG(TAG, "  ctrl_in_gpio: %d", this->ctrl_in_gpio_);
+  ESP_LOGCONFIG(TAG, "  display_data_gpio (Pin5): %d", this->data_gpio_);
+  ESP_LOGCONFIG(TAG, "  control_gpio (Pin3): %d", this->ctrl_in_gpio_);
   ESP_LOGCONFIG(TAG, "  ctrl_out_gpio: %d", this->ctrl_out_gpio_);
   ESP_LOGCONFIG(TAG, "  gap_us: %u", (unsigned) this->gap_us_);
   ESP_LOGCONFIG(TAG, "  press_frames: %u", (unsigned) this->press_frames_);
@@ -148,16 +118,14 @@ void Balboa9800CP::setup() {
     return;
   }
 
-  gpio_num_t clk  = (gpio_num_t) this->clk_gpio_;
+  gpio_num_t clk = (gpio_num_t) this->clk_gpio_;
   gpio_num_t disp = (gpio_num_t) this->data_gpio_;
   gpio_num_t ctrl = (gpio_num_t) this->ctrl_in_gpio_;
-  gpio_num_t out  = (gpio_num_t) this->ctrl_out_gpio_;
+  gpio_num_t out = (gpio_num_t) this->ctrl_out_gpio_;
 
   gpio_reset_pin(clk);
   gpio_set_direction(clk, GPIO_MODE_INPUT);
-
-  // ✅ CRITICAL: rising edge only (one sample per clock pulse)
-  gpio_set_intr_type(clk, GPIO_INTR_POSEDGE);
+  gpio_set_intr_type(clk, GPIO_INTR_ANYEDGE);
 
   gpio_reset_pin(disp);
   gpio_set_direction(disp, GPIO_MODE_INPUT);
@@ -165,9 +133,8 @@ void Balboa9800CP::setup() {
   gpio_reset_pin(ctrl);
   gpio_set_direction(ctrl, GPIO_MODE_INPUT);
 
-  // Keep ctrl_out high-Z for now (button injection later)
   gpio_reset_pin(out);
-  gpio_set_direction(out, GPIO_MODE_INPUT);
+  gpio_set_direction(out, GPIO_MODE_INPUT);  // keep high-Z for now (no injection yet)
 
   static bool installed = false;
   if (!installed) {
@@ -191,17 +158,13 @@ void Balboa9800CP::setup() {
   this->isr_edge_count_ = 0;
 
   last_valid_ = false;
-  have_prev_stat_eq_ = false;
-  have_last_temp_ = false;
-  last_temp_f_ = NAN;
 
-  ESP_LOGI(TAG, "ISR attached (POSEDGE). clk=%d disp=%d ctrl_in=%d ctrl_out=%d",
+  ESP_LOGI(TAG, "ISR attached. clk=%d disp(pin5)=%d ctrl(pin3)=%d out=%d",
            this->clk_gpio_, this->data_gpio_, this->ctrl_in_gpio_, this->ctrl_out_gpio_);
 }
 
 void IRAM_ATTR Balboa9800CP::isr_router_() {
-  if (Balboa9800CP::instance_ != nullptr)
-    Balboa9800CP::instance_->on_clock_edge_();
+  if (Balboa9800CP::instance_ != nullptr) Balboa9800CP::instance_->on_clock_edge_();
 }
 
 void IRAM_ATTR Balboa9800CP::on_clock_edge_() {
@@ -211,51 +174,50 @@ void IRAM_ATTR Balboa9800CP::on_clock_edge_() {
   const uint32_t dt = now - this->last_edge_us_;
   this->last_edge_us_ = now;
 
-  // Resync on long idle gap: start a new frame
-  if (dt > this->gap_us_) {
-    this->bit_index_ = 0;
-    this->frame_ready_ = false;  // ensure capture resumes
-  }
-
-  // Frame-freeze guard: don’t overwrite until next resync gap
-  if (this->frame_ready_) return;
+  if (dt > this->gap_us_) this->bit_index_ = 0;
 
   const int i = this->bit_index_;
-  if (i < 0 || i >= FRAME_BITS) return;
+  if (i < 0 || i >= 76) return;
 
-  // Sample both lines on same rising edge
+  // Sample BOTH lines on the same clock edge:
   this->disp_bits_[i] = gpio_get_level((gpio_num_t) this->data_gpio_) ? 1 : 0;
   this->ctrl_bits_[i] = gpio_get_level((gpio_num_t) this->ctrl_in_gpio_) ? 1 : 0;
 
   this->bit_index_++;
 
+  // We only need the first 42 bits for 6×7 decoding
   if (this->bit_index_ >= FRAME_BITS) {
     portENTER_CRITICAL_ISR(&balboa_mux);
     this->frame_ready_ = true;
     portEXIT_CRITICAL_ISR(&balboa_mux);
+    this->bit_index_ = 0;  // restart cleanly for next frame
   }
 }
 
 void Balboa9800CP::queue_command(uint8_t cmd) {
   (void) cmd;
-  // Injection disabled for now (next step).
+  // Injection not enabled yet in this phase.
+}
+
+void Balboa9800CP::process_frame_() {
+  // not used
 }
 
 void Balboa9800CP::loop() {
   const uint32_t now = millis();
 
-  // 1 Hz edge counter
+  // 1 Hz ISR activity debug
   static uint32_t last_edges_ms = 0;
   if (now - last_edges_ms >= 1000) {
     last_edges_ms = now;
     const uint32_t edges = this->isr_edge_count_;
     this->isr_edge_count_ = 0;
     ESP_LOGD(TAG, "clk edges/sec=%u bit_index=%d frame_ready=%d",
-             (unsigned) edges, this->bit_index_, (int) this->frame_ready_);
+             (unsigned) edges, this->bit_index_, this->frame_ready_ ? 1 : 0);
   }
 
-  // Copy out a completed frame if available
-  bool got_frame = false;
+  // Cache latest completed frame
+  bool got = false;
   portENTER_CRITICAL(&balboa_mux);
   if (this->frame_ready_) {
     for (int i = 0; i < FRAME_BITS; i++) {
@@ -264,122 +226,95 @@ void Balboa9800CP::loop() {
     }
     last_valid_ = true;
     this->frame_ready_ = false;
-    got_frame = true;
+    got = true;
   }
   portEXIT_CRITICAL(&balboa_mux);
 
-  if (!last_valid_) return;
+  if (!last_valid_ || !got) return;
 
-  // Process at ~5 Hz
-  static uint32_t last_process_ms = 0;
-  if (now - last_process_ms < 200) return;
-  last_process_ms = now;
+  // Build 6 chunks (LSB-first 7-bit each) from display line
+  const uint8_t d1 = bits_to_u7_lsb_first(last_disp_, 0);
+  const uint8_t d2 = bits_to_u7_lsb_first(last_disp_, 7);
+  const uint8_t d3 = bits_to_u7_lsb_first(last_disp_, 14);
+  const uint8_t d4 = bits_to_u7_lsb_first(last_disp_, 21);
+  const uint8_t stat = bits_to_u7_lsb_first(last_disp_, 28);
+  const uint8_t eq = bits_to_u7_lsb_first(last_disp_, 35);
 
-  // Decode chunks
-  const uint8_t d1   = pack7_msb(last_disp_, 0);
-  const uint8_t d2   = pack7_msb(last_disp_, 7);
-  const uint8_t d3   = pack7_msb(last_disp_, 14);
-  const uint8_t d4   = pack7_msb(last_disp_, 21);
-  const uint8_t stat = pack7_msb(last_disp_, 28);
-  const uint8_t eq   = pack7_msb(last_disp_, 35);
+  // Display char order that matches your observed logs: D1, D3, D2, D4
+  char disp[5];
+  disp[0] = seg7_to_char(d1);
+  disp[1] = seg7_to_char(d3);
+  disp[2] = seg7_to_char(d2);
+  disp[3] = seg7_to_char(d4);
+  disp[4] = '\0';
 
-  // Decode display (4 chars)
-  std::string disp;
-  disp.reserve(4);
-  disp.push_back(seg7_to_char(d4));
-  disp.push_back(seg7_to_char(d3));
-  disp.push_back(seg7_to_char(d2));
-  disp.push_back(seg7_to_char(d1));
+  // Bits proven from your logs:
+  const bool pump1 = (eq & 0x20) != 0;  // Pump1
+  const bool pump2 = (eq & 0x10) != 0;  // Pump2
+  const bool light = (eq & 0x08) != 0;  // Light
 
-  // Publish display
-  if (this->display_text_ != nullptr) {
-    this->display_text_->publish_state(disp);
+  // Best-effort: setpoint indicator observed as STAT bit 0x40 toggling during set temp display
+  const bool showing_setpoint = (stat & 0x40) != 0;
+
+  // Publish entities
+  if (this->display_text_ != nullptr) this->display_text_->publish_state(std::string(disp));
+
+  // Water temp: only publish when we're NOT showing setpoint (so we treat that as "current temp")
+  float tf = 0;
+  if (!showing_setpoint && this->water_temp_ != nullptr && parse_temp_f_from_display(disp, &tf)) {
+    this->water_temp_->publish_state(tf);
   }
 
-  // Publish temp only when numeric; otherwise keep last
-  if (this->water_temp_ != nullptr) {
-    int temp_f = 0;
-    if (parse_reasonable_temp_f(disp, temp_f)) {
-      last_temp_f_ = (float) temp_f;
-      have_last_temp_ = true;
-      this->water_temp_->publish_state(last_temp_f_);
-    } else {
-      // keep last known temp in HA
-    }
-  }
+  if (this->set_heat_ != nullptr) this->set_heat_->publish_state(showing_setpoint);
 
-  // "Set heat" heuristic
-  const bool set_heat = looks_like_set_mode(disp);
-  if (this->set_heat_ != nullptr) this->set_heat_->publish_state(set_heat);
+  // Map your YAML sensors to what we now know:
+  if (this->pump_ != nullptr) this->pump_->publish_state(pump1);     // "Spa Pump" = Pump1
+  if (this->jets_ != nullptr) this->jets_->publish_state(pump2);     // "Spa Jets" = Pump2
+  if (this->light_ != nullptr) this->light_->publish_state(light);   // Light
 
-  // ✅ Pump1 bit confirmed from your diff: EQ bit 0x20 flips with Pump1
-  const bool pump1_on = (eq & 0x20) != 0;
-  if (this->pump_ != nullptr) this->pump_->publish_state(pump1_on);
-
-  // Keep other binary sensors publishing “unknown/false” until we map them:
-  if (this->heating_ != nullptr) this->heating_->publish_state(false);
-  if (this->light_ != nullptr) this->light_->publish_state(false);
-  if (this->jets_ != nullptr) this->jets_->publish_state(false);
-  if (this->blower_ != nullptr) this->blower_->publish_state(false);
+  // Leave these as placeholders for now (until we positively identify their bits)
+  if (this->blower_ != nullptr) this->blower_->publish_state((eq & 0x04) != 0);   // guess
+  if (this->heating_ != nullptr) this->heating_->publish_state((eq & 0x01) != 0); // guess
   if (this->mode_standard_ != nullptr) this->mode_standard_->publish_state(false);
   if (this->temp_up_display_ != nullptr) this->temp_up_display_->publish_state(false);
   if (this->temp_down_display_ != nullptr) this->temp_down_display_->publish_state(false);
   if (this->inverted_ != nullptr) this->inverted_->publish_state(false);
 
-  // Diff logging: STAT/EQ changes and which bits flipped
-  if (got_frame) {
-    if (!have_prev_stat_eq_) {
-      have_prev_stat_eq_ = true;
-      prev_stat_ = stat;
-      prev_eq_ = eq;
-      ESP_LOGI(TAG, "Initial STAT=0x%02X (%s)  EQ=0x%02X (%s)  Display=\"%s\" Pump1=%d",
-               stat, bits7(stat).c_str(), eq, bits7(eq).c_str(), disp.c_str(), (int) pump1_on);
-    } else {
-      const uint8_t dstat = (uint8_t) (prev_stat_ ^ stat);
-      const uint8_t deq   = (uint8_t) (prev_eq_ ^ eq);
+  // Change logging (very similar to what you’re seeing)
+  static char last_disp_str[5] = "----";
+  static uint8_t last_stat = 0xFF;
+  static uint8_t last_eq = 0xFF;
 
-      if (dstat != 0 || deq != 0) {
-        ESP_LOGI(TAG, "CHANGE Display=\"%s\"  STAT 0x%02X->0x%02X (xor 0x%02X)  EQ 0x%02X->0x%02X (xor 0x%02X) Pump1=%d",
-                 disp.c_str(), prev_stat_, stat, dstat, prev_eq_, eq, deq, (int) pump1_on);
+  if (strncmp(last_disp_str, disp, 4) != 0 || last_stat != stat || last_eq != eq) {
+    ESP_LOGI(TAG, "CHANGE Display=\"%s\"  STAT 0x%02X->0x%02X (xor 0x%02X)  EQ 0x%02X->0x%02X (xor 0x%02X) Pump1=%d",
+             disp,
+             last_stat, stat, (uint8_t)(last_stat ^ stat),
+             last_eq, eq, (uint8_t)(last_eq ^ eq),
+             pump1 ? 1 : 0);
 
-        if (dstat != 0) {
-          ESP_LOGI(TAG, "  STAT bits old=%s new=%s",
-                   bits7(prev_stat_).c_str(), bits7(stat).c_str());
-        }
-        if (deq != 0) {
-          ESP_LOGI(TAG, "  EQ   bits old=%s new=%s",
-                   bits7(prev_eq_).c_str(), bits7(eq).c_str());
-        }
-
-        prev_stat_ = stat;
-        prev_eq_ = eq;
-      }
-    }
+    last_disp_str[0] = disp[0];
+    last_disp_str[1] = disp[1];
+    last_disp_str[2] = disp[2];
+    last_disp_str[3] = disp[3];
+    last_disp_str[4] = '\0';
+    last_stat = stat;
+    last_eq = eq;
   }
 
-  // Optional: raw frame once/sec
-  static uint32_t last_dbg_ms = 0;
-  if (now - last_dbg_ms >= 1000) {
-    last_dbg_ms = now;
+  // Periodic detailed chunk log (1 Hz)
+  static uint32_t last_chunk_ms = 0;
+  if (now - last_chunk_ms >= 1000) {
+    last_chunk_ms = now;
 
-    char disp_bits_str[FRAME_BITS + 1];
-    char ctrl_bits_str[FRAME_BITS + 1];
-    for (int i = 0; i < FRAME_BITS; i++) {
-      disp_bits_str[i] = last_disp_[i] ? '1' : '0';
-      ctrl_bits_str[i] = last_ctrl_[i] ? '1' : '0';
-    }
-    disp_bits_str[FRAME_BITS] = '\0';
-    ctrl_bits_str[FRAME_BITS] = '\0';
+    // Print the 42 captured bits as a sanity check
+    char bits42[FRAME_BITS + 1];
+    for (int i = 0; i < FRAME_BITS; i++) bits42[i] = last_disp_[i] ? '1' : '0';
+    bits42[FRAME_BITS] = '\0';
 
-    ESP_LOGI(TAG, "DISP(pin5) bits[%d]: %s", FRAME_BITS, disp_bits_str);
-    ESP_LOGI(TAG, "CTRL(pin3) bits[%d]: %s", FRAME_BITS, ctrl_bits_str);
+    ESP_LOGI(TAG, "DISP(pin5) bits[%d]: %s", FRAME_BITS, bits42);
     ESP_LOGI(TAG, "Chunks: D1=0x%02X D2=0x%02X D3=0x%02X D4=0x%02X STAT=0x%02X EQ=0x%02X  Display=\"%s\" Pump1=%d",
-             d1, d2, d3, d4, stat, eq, disp.c_str(), (int) pump1_on);
+             d1, d2, d3, d4, stat, eq, disp, pump1 ? 1 : 0);
   }
-}
-
-void Balboa9800CP::process_frame_() {
-  // Not used
 }
 
 }  // namespace balboa_9800cp
