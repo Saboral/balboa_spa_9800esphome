@@ -123,7 +123,7 @@ void IRAM_ATTR Balboa9800CP::isr_router_() {
 static inline uint8_t pack7(const uint8_t *bits, int start) {
   uint8_t v = 0;
   for (int k = 0; k < 7; k++) {
-    v |= (bits[start + k] ? 1 : 0) << k;
+    v |= (bits[start + k] ? 1 : 0) << (6 - k);
   }
   return v & 0x7F;
 }
