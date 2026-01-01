@@ -32,6 +32,14 @@ static uint8_t prev_eq_ = 0;
 static bool have_last_temp_ = false;
 static float last_temp_f_ = NAN;
 
+// -----------------------------------------------------------------------
+// Intermittent sampling control (reduce ISR/CPU load)
+// Capture one frame, then disable clock interrupts until next interval.
+// -----------------------------------------------------------------------
+static constexpr uint32_t SAMPLE_INTERVAL_MS = 2000;  // adjust (e.g., 2000–5000ms)
+static constexpr uint32_t CAPTURE_TIMEOUT_MS  = 200;  // safety timeout for one frame
+static bool capture_enabled = false;
+
 // Pack 7 bits MSB-first from bit array: bits[start+0] becomes bit6 ... bits[start+6] becomes bit0
 static uint8_t pack7_msb(const uint8_t *bits, int start) {
   uint8_t v = 0;
@@ -171,7 +179,7 @@ void Balboa9800CP::set_pins(GPIOPin *clk, GPIOPin *data, GPIOPin *ctrl_in, GPIOP
 }
 
 void Balboa9800CP::dump_config() {
-  ESP_LOGCONFIG(TAG, "Balboa 9800CP (decoder.txt seg7 + Pump1 bit):");
+  ESP_LOGCONFIG(TAG, "Balboa 9800CP (decoder.txt seg7 + bit-mapped equipment):");
   ESP_LOGCONFIG(TAG, "  clk_gpio: %d", this->clk_gpio_);
   ESP_LOGCONFIG(TAG, "  display_data_gpio: %d", this->data_gpio_);
   ESP_LOGCONFIG(TAG, "  ctrl_in_gpio: %d", this->ctrl_in_gpio_);
@@ -244,6 +252,10 @@ void Balboa9800CP::setup() {
 
   ESP_LOGI(TAG, "ISR attached (POSEDGE). clk=%d disp=%d ctrl_in=%d ctrl_out=%d",
            this->clk_gpio_, this->data_gpio_, this->ctrl_in_gpio_, this->ctrl_out_gpio_);
+
+  // Start with clock interrupt disabled; loop() will enable during sampling windows
+  gpio_intr_disable(clk);
+  capture_enabled = false;
 }
 
 void IRAM_ATTR Balboa9800CP::isr_router_() {
@@ -252,6 +264,7 @@ void IRAM_ATTR Balboa9800CP::isr_router_() {
 }
 
 void IRAM_ATTR Balboa9800CP::on_clock_edge_() {
+  if (!capture_enabled) return;
   this->isr_edge_count_++;
 
   const uint32_t now = micros();
@@ -290,6 +303,39 @@ void Balboa9800CP::queue_command(uint8_t cmd) {
 
 void Balboa9800CP::loop() {
   const uint32_t now = millis();
+
+  // -----------------------------------------------------------------------
+  // Intermittent sampling scheduler:
+  // Enable clock interrupt briefly to capture one frame, then disable.
+  // -----------------------------------------------------------------------
+  static uint32_t next_sample_ms = 0;
+  static uint32_t capture_start_ms = 0;
+
+  if (!capture_enabled && now >= next_sample_ms) {
+    capture_enabled = true;
+    capture_start_ms = now;
+
+    // Reset capture state for a fresh frame
+    portENTER_CRITICAL(&balboa_mux);
+    this->bit_index_ = 0;
+    this->frame_ready_ = false;
+    portEXIT_CRITICAL(&balboa_mux);
+
+    gpio_intr_enable((gpio_num_t) this->clk_gpio_);
+  }
+
+  if (capture_enabled) {
+    bool done = false;
+    portENTER_CRITICAL(&balboa_mux);
+    done = this->frame_ready_;
+    portEXIT_CRITICAL(&balboa_mux);
+
+    if (done || (now - capture_start_ms) > CAPTURE_TIMEOUT_MS) {
+      gpio_intr_disable((gpio_num_t) this->clk_gpio_);
+      capture_enabled = false;
+      next_sample_ms = now + SAMPLE_INTERVAL_MS;
+    }
+  }
 
   // 1 Hz edge counter
   static uint32_t last_edges_ms = 0;
@@ -330,7 +376,7 @@ void Balboa9800CP::loop() {
   const uint8_t stat = pack7_msb(last_disp_, 28);
   const uint8_t eq   = pack7_msb(last_disp_, 35);
 
-  // Decode display (4 chars)
+  // Decode display (4 chars) -- keep your established order
   std::string disp;
   disp.reserve(4);
   disp.push_back(seg7_to_char(d1));
@@ -338,20 +384,13 @@ void Balboa9800CP::loop() {
   disp.push_back(seg7_to_char(d3));
   disp.push_back(seg7_to_char(d4));
 
-  // -----------------------------------------------------------------------
-  // (1) Throttle ALL HA publishing to every 30 seconds
-  // -----------------------------------------------------------------------
-  static uint32_t last_ha_publish_ms = 0;
-  const bool do_ha_publish = (now - last_ha_publish_ms) >= 30000;
-  if (do_ha_publish) last_ha_publish_ms = now;
-
-  // Publish display (throttled)
-  if (do_ha_publish && this->display_text_ != nullptr) {
+  // Publish display
+  if (this->display_text_ != nullptr) {
     this->display_text_->publish_state(disp);
   }
 
-  // Publish temp only when numeric; otherwise keep last (throttled)
-  if (do_ha_publish && this->water_temp_ != nullptr) {
+  // Publish temp only when numeric; otherwise keep last
+  if (this->water_temp_ != nullptr) {
     int temp_f = 0;
     if (parse_reasonable_temp_f(disp, temp_f)) {
       last_temp_f_ = (float) temp_f;
@@ -362,23 +401,28 @@ void Balboa9800CP::loop() {
     }
   }
 
-  // "Set heat" heuristic (throttled)
+  // "Set heat" heuristic
   const bool set_heat = looks_like_set_mode(disp);
-  if (do_ha_publish && this->set_heat_ != nullptr) this->set_heat_->publish_state(set_heat);
+  if (this->set_heat_ != nullptr) this->set_heat_->publish_state(set_heat);
 
-  // ✅ Pump1 bit confirmed from your diff: EQ bit 0x20 flips with Pump1 (throttled)
-  const bool pump1_on = (eq & 0x20) != 0;
-  if (do_ha_publish && this->pump_ != nullptr) this->pump_->publish_state(pump1_on);
+  // Mapped equipment bits (raw DISP frame indices)
+  // 35=Heater, 36=Pump1, 37=Pump2, 38=Air Blower
+  const bool heater_on = last_disp_[35] != 0;
+  const bool pump1_on  = last_disp_[36] != 0;
+  const bool pump2_on  = last_disp_[37] != 0;
+  const bool blower_on = last_disp_[38] != 0;
 
-  // Keep other binary sensors publishing “unknown/false” until we map them: (throttled)
-  if (do_ha_publish && this->heating_ != nullptr) this->heating_->publish_state(false);
-  if (do_ha_publish && this->light_ != nullptr) this->light_->publish_state(false);
-  if (do_ha_publish && this->jets_ != nullptr) this->jets_->publish_state(false);
-  if (do_ha_publish && this->blower_ != nullptr) this->blower_->publish_state(false);
-  if (do_ha_publish && this->mode_standard_ != nullptr) this->mode_standard_->publish_state(false);
-  if (do_ha_publish && this->temp_up_display_ != nullptr) this->temp_up_display_->publish_state(false);
-  if (do_ha_publish && this->temp_down_display_ != nullptr) this->temp_down_display_->publish_state(false);
-  if (do_ha_publish && this->inverted_ != nullptr) this->inverted_->publish_state(false);
+  if (this->heating_ != nullptr) this->heating_->publish_state(heater_on);
+  if (this->pump_ != nullptr) this->pump_->publish_state(pump1_on);
+  if (this->jets_ != nullptr) this->jets_->publish_state(pump2_on);
+  if (this->blower_ != nullptr) this->blower_->publish_state(blower_on);
+  if (this->light_ != nullptr) this->light_->publish_state(false);
+
+  // Keep other binary sensors publishing “unknown/false” until we map them:
+  if (this->mode_standard_ != nullptr) this->mode_standard_->publish_state(false);
+  if (this->temp_up_display_ != nullptr) this->temp_up_display_->publish_state(false);
+  if (this->temp_down_display_ != nullptr) this->temp_down_display_->publish_state(false);
+  if (this->inverted_ != nullptr) this->inverted_->publish_state(false);
 
   // Diff logging: STAT/EQ changes and which bits flipped
   if (got_frame) {
@@ -405,11 +449,9 @@ void Balboa9800CP::loop() {
     }
   }
 
-  // -----------------------------------------------------------------------
-  // (3) Reduce snapshot logging to every 5 seconds
-  // -----------------------------------------------------------------------
+  // Optional: raw frame once/sec (unchanged from your file)
   static uint32_t last_dbg_ms = 0;
-  if (now - last_dbg_ms >= 5000) {
+  if (now - last_dbg_ms >= 1000) {
     last_dbg_ms = now;
 
     char disp_bits_str[FRAME_BITS + 1];
@@ -424,20 +466,9 @@ void Balboa9800CP::loop() {
     ESP_LOGI(TAG, "DISP(pin5) bits[%d]: %s", FRAME_BITS, disp_bits_str);
     ESP_LOGI(TAG, "CTRL(pin3) bits[%d]: %s", FRAME_BITS, ctrl_bits_str);
 
-    // ✅ Chunks printed in 7-bit binary (instead of hex)
     ESP_LOGI(TAG, "Chunks: D1=%s D2=%s D3=%s D4=%s STAT=%s EQ=%s  Display=\"%s\" Pump1=%d",
              bits7(d1).c_str(), bits7(d2).c_str(), bits7(d3).c_str(), bits7(d4).c_str(),
              bits7(stat).c_str(), bits7(eq).c_str(), disp.c_str(), (int) pump1_on);
-
-    // ---------------------------------------------------------------------
-    // (2) Log bits 28..38 of the 42-bit DISP frame (explicit 0/1 values)
-    // Bits requested: 28-34 and 35-38 (inclusive)
-    // ---------------------------------------------------------------------
-    ESP_LOGI(TAG,
-             "DISP bit states: [28..34]=%d%d%d%d%d%d%d  [35..38]=%d%d%d%d",
-             (int) last_disp_[28], (int) last_disp_[29], (int) last_disp_[30], (int) last_disp_[31],
-             (int) last_disp_[32], (int) last_disp_[33], (int) last_disp_[34],
-             (int) last_disp_[35], (int) last_disp_[36], (int) last_disp_[37], (int) last_disp_[38]);
   }
 }
 
