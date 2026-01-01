@@ -333,10 +333,10 @@ void Balboa9800CP::loop() {
   // Decode display (4 chars)
   std::string disp;
   disp.reserve(4);
-  disp.push_back(seg7_to_char(d4));
-  disp.push_back(seg7_to_char(d3));
-  disp.push_back(seg7_to_char(d2));
   disp.push_back(seg7_to_char(d1));
+  disp.push_back(seg7_to_char(d2));
+  disp.push_back(seg7_to_char(d3));
+  disp.push_back(seg7_to_char(d4));
 
   // Publish display
   if (this->display_text_ != nullptr) {
