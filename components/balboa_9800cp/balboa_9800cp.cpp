@@ -49,33 +49,80 @@ static std::string bits7(uint8_t v) {
   return s;
 }
 
-// ✅ Strict 7-seg decoder (no collisions). Patterns are masked to 7 bits.
-static char seg7_to_char(uint8_t pat7) {
-  switch (pat7 & 0x7F) {
-    // Digits for *your* 9800CP (based on observed frames)
-    case 0x06: return '1';
-    case 0x7E: return '0';   // observed behaving as 0
-    case 0x6D: return '2';   // observed behaving as 2 (not 5 on your panel)
+// ---- Decoder from decoder.txt (7-bit LCD character patterns) ----
+// NOTE: decoder.txt returns strings; here we return a single char.
+// Any multi-char/ambiguous cases in decoder.txt were commented out there; we keep it the same.
+static char seg7_to_char(uint8_t LCD_character) {
+  switch (LCD_character & 0x7F) {
+    case 0b0000000: return ' ';  // " "
+    case 0b1111110: return '0';
+    case 0b0110000: return '1';
+    case 0b1101101: return '2';
+    case 0b1111001: return '3';
+    case 0b0110011: return '4';
+    case 0b1011011: return '5';
+    case 0b1011111: return '6';
+    case 0b1110000: return '7';
+    case 0b1111111: return '8';
+    case 0b1110011: return '9';
 
-    // Keep standard mappings we might still see
-    case 0x4F: return '3';
-    case 0x66: return '4';
-    case 0x7D: return '6';
-    case 0x07: return '7';
-    case 0x7F: return '8';
-    case 0x6F: return '9';
+    case 0b1110111: return 'A';
+    // case 0b0011111: return 'B';
+    case 0b1001110: return 'C';
+    // case 0b0111101: return 'D';
+    case 0b1001111: return 'E';
+    // case 0b1000111: return 'F';
+    case 0b1011110: return 'G';
+    case 0b0110111: return 'H';
+    // case 0b0000110: return 'I';
+    case 0b0111100: return 'J';
+    // case 0b1010111: return 'K';
+    case 0b0001110: return 'L';
+    case 0b1010100: return 'M';
+    case 0b1110110: return 'N';
+    // case 0b1111110: return 'O';
+    // case 0b1100111: return 'P';
+    case 0b1101011: return 'Q';
+    case 0b1100110: return 'R';
+    // case 0b1011011: return 'S';
+    // case 0b0001111: return 'T';
+    case 0b0111110: return 'U';
+    // case 0b0111110: return 'V';
+    case 0b0101010: return 'W';
+    // case 0b0110111: return 'X';
+    // case 0b0111011: return 'Y';
+    // case 0b1101101: return 'Z';
 
-    // Likely trailing unit glyph (often F) on your panel
-    case 0x39: return 'F';
+    case 0b1111101: return 'a';
+    case 0b0011111: return 'b';
+    case 0b0001101: return 'c';
+    case 0b0111101: return 'd';
+    case 0b1101111: return 'e';
+    case 0b1000111: return 'f';
 
-    case 0x40: return '-';
-    case 0x00: return ' ';
+    // case 0b1111011: return 'g';
+    case 0b0010111: return 'h';
+    case 0b0000100: return 'i';
+    case 0b0000001: return 'j';
+    case 0b1010111: return 'k';
+    case 0b0000110: return 'l';
+    case 0b0010100: return 'm';
+    case 0b0010101: return 'n';
+    case 0b0011101: return 'o';
+    case 0b1100111: return 'p';
+    // case 0b1110011: return 'q';
+    case 0b0000101: return 'r';
+    // case 0b1011011: return 's';
+    case 0b0001111: return 't';
+    case 0b0011100: return 'u';
+    // case 0b0011100: return 'v';
+    // case 0b0010100: return 'w';
+    // case 0b0110111: return 'x';
+    case 0b0111011: return 'y';
 
-    default:   return '?';
+    default: return '-'; // Error condition
   }
 }
-
-
 
 static bool looks_like_set_mode(const std::string &s) {
   bool has_s = false, has_e = false, has_t = false;
@@ -124,7 +171,7 @@ void Balboa9800CP::set_pins(GPIOPin *clk, GPIOPin *data, GPIOPin *ctrl_in, GPIOP
 }
 
 void Balboa9800CP::dump_config() {
-  ESP_LOGCONFIG(TAG, "Balboa 9800CP (strict seg7 + Pump1 bit):");
+  ESP_LOGCONFIG(TAG, "Balboa 9800CP (decoder.txt seg7 + Pump1 bit):");
   ESP_LOGCONFIG(TAG, "  clk_gpio: %d", this->clk_gpio_);
   ESP_LOGCONFIG(TAG, "  display_data_gpio: %d", this->data_gpio_);
   ESP_LOGCONFIG(TAG, "  ctrl_in_gpio: %d", this->ctrl_in_gpio_);
@@ -332,24 +379,18 @@ void Balboa9800CP::loop() {
       have_prev_stat_eq_ = true;
       prev_stat_ = stat;
       prev_eq_ = eq;
-      ESP_LOGI(TAG, "Initial STAT=0x%02X (%s)  EQ=0x%02X (%s)  Display=\"%s\" Pump1=%d",
-               stat, bits7(stat).c_str(), eq, bits7(eq).c_str(), disp.c_str(), (int) pump1_on);
+      ESP_LOGI(TAG, "Initial STAT=%s  EQ=%s  Display=\"%s\" Pump1=%d",
+               bits7(stat).c_str(), bits7(eq).c_str(), disp.c_str(), (int) pump1_on);
     } else {
       const uint8_t dstat = (uint8_t) (prev_stat_ ^ stat);
       const uint8_t deq   = (uint8_t) (prev_eq_ ^ eq);
 
       if (dstat != 0 || deq != 0) {
-        ESP_LOGI(TAG, "CHANGE Display=\"%s\"  STAT 0x%02X->0x%02X (xor 0x%02X)  EQ 0x%02X->0x%02X (xor 0x%02X) Pump1=%d",
-                 disp.c_str(), prev_stat_, stat, dstat, prev_eq_, eq, deq, (int) pump1_on);
-
-        if (dstat != 0) {
-          ESP_LOGI(TAG, "  STAT bits old=%s new=%s",
-                   bits7(prev_stat_).c_str(), bits7(stat).c_str());
-        }
-        if (deq != 0) {
-          ESP_LOGI(TAG, "  EQ   bits old=%s new=%s",
-                   bits7(prev_eq_).c_str(), bits7(eq).c_str());
-        }
+        ESP_LOGI(TAG, "CHANGE Display=\"%s\"  STAT %s->%s (xor %s)  EQ %s->%s (xor %s) Pump1=%d",
+                 disp.c_str(),
+                 bits7(prev_stat_).c_str(), bits7(stat).c_str(), bits7(dstat).c_str(),
+                 bits7(prev_eq_).c_str(),   bits7(eq).c_str(),   bits7(deq).c_str(),
+                 (int) pump1_on);
 
         prev_stat_ = stat;
         prev_eq_ = eq;
@@ -373,8 +414,11 @@ void Balboa9800CP::loop() {
 
     ESP_LOGI(TAG, "DISP(pin5) bits[%d]: %s", FRAME_BITS, disp_bits_str);
     ESP_LOGI(TAG, "CTRL(pin3) bits[%d]: %s", FRAME_BITS, ctrl_bits_str);
-    ESP_LOGI(TAG, "Chunks: D1=0x%02X D2=0x%02X D3=0x%02X D4=0x%02X STAT=0x%02X EQ=0x%02X  Display=\"%s\" Pump1=%d",
-             d1, d2, d3, d4, stat, eq, disp.c_str(), (int) pump1_on);
+
+    // ✅ Chunks printed in 7-bit binary (instead of hex)
+    ESP_LOGI(TAG, "Chunks: D1=%s D2=%s D3=%s D4=%s STAT=%s EQ=%s  Display=\"%s\" Pump1=%d",
+             bits7(d1).c_str(), bits7(d2).c_str(), bits7(d3).c_str(), bits7(d4).c_str(),
+             bits7(stat).c_str(), bits7(eq).c_str(), disp.c_str(), (int) pump1_on);
   }
 }
 
