@@ -12,7 +12,7 @@ static const char *const TAG = "balboa_9800cp";
 Balboa9800CP *Balboa9800CP::instance_ = nullptr;
 static portMUX_TYPE balboa_mux = portMUX_INITIALIZER_UNLOCKED;
 
-// Protocol observed: 42 bits = 6 chunks × 7 bits (LSB-first)
+// Protocol observed: 42 bits = 6 chunks × 7 bits
 static constexpr int FRAME_BITS = 42;
 static constexpr int CHUNK_BITS = 7;
 
@@ -22,6 +22,20 @@ static uint8_t last_ctrl_[76];
 static bool last_valid_ = false;
 
 // ---- helpers ----
+
+// MSB-first 7-bit packing from captured bits[start_bit..start_bit+6]
+// i.e. first captured bit is MSB (bit 6), last is LSB (bit 0)
+static inline uint8_t bits_to_u7_msb_first(const uint8_t *bits, int start_bit) {
+  uint8_t v = 0;
+  for (int k = 0; k < CHUNK_BITS; k++) {
+    if (bits[start_bit + k]) {
+      v |= (1U << (6 - k));
+    }
+  }
+  return v & 0x7F;
+}
+
+// (Optional) LSB-first pack for debug comparison
 static inline uint8_t bits_to_u7_lsb_first(const uint8_t *bits, int start_bit) {
   uint8_t v = 0;
   for (int k = 0; k < CHUNK_BITS; k++) {
@@ -30,28 +44,25 @@ static inline uint8_t bits_to_u7_lsb_first(const uint8_t *bits, int start_bit) {
   return v & 0x7F;
 }
 
-// Strict 7-seg mapping for *this wiring/protocol* (based on your captured chunks)
-// Unknown patterns return '?'
+// Strict 7-seg mapping (MSB-first space) based on your captures
+// Known: 0=0x3F, 1=0x4E, 2=0x5B, F=0x30
 static inline char seg7_to_char(uint8_t s) {
   switch (s) {
-    // Digits seen and/or derived (many are bit-reverse of common 7seg, except '1' proved as 0x39 in your logs)
-    case 0x7E: return '0';
-    case 0x39: return '1';   // proven by your logs (D1=0x39 corresponds to leading '1')
-    case 0x6D: return '2';   // proven by your logs (D2=0x6D corresponds to '2' in 102F)
-    case 0x79: return '3';   // best-effort derived; will show '?' if wrong
-    case 0x33: return '4';   // best-effort derived
-    case 0x5B: return '5';   // best-effort derived (NOTE: NOT 0x6D)
-    case 0x5F: return '6';   // best-effort derived
-    case 0x70: return '7';   // best-effort derived
-    case 0x7F: return '8';   // best-effort derived (same both ways for many wirings)
-    case 0x7B: return '9';   // best-effort derived
+    case 0x3F: return '0';
+    case 0x4E: return '1';
+    case 0x5B: return '2';
+    case 0x4F: return '3';
+    case 0x66: return '4';
+    case 0x6D: return '5';
+    case 0x7D: return '6';
+    case 0x07: return '7';
+    case 0x7F: return '8';
+    case 0x6F: return '9';
 
-    // Units / letters (as observed: D4=0x06 is 'F' in your logs)
-    case 0x06: return 'F';
+    case 0x30: return 'F';
 
-    // Common extras (best-effort)
     case 0x00: return ' ';
-    case 0x40: return '-';
+    case 0x40: return '-';  // if ever observed in this MSB space
 
     default: return '?';
   }
@@ -59,7 +70,6 @@ static inline char seg7_to_char(uint8_t s) {
 
 static inline bool parse_temp_f_from_display(const char *disp, float *out_f) {
   // Expect formats like "102F", " 98F", etc.
-  // We’ll extract up to 3 digits before trailing 'F'.
   if (!disp) return false;
 
   int len = (int) strlen(disp);
@@ -76,6 +86,7 @@ static inline bool parse_temp_f_from_display(const char *disp, float *out_f) {
     }
   }
   if (digits == 0) return false;
+
   *out_f = (float) value;
   return true;
 }
@@ -94,7 +105,7 @@ void Balboa9800CP::set_pins(GPIOPin *clk, GPIOPin *data, GPIOPin *ctrl_in, GPIOP
 }
 
 void Balboa9800CP::dump_config() {
-  ESP_LOGCONFIG(TAG, "Balboa 9800CP (strict seg7 + Pump bits):");
+  ESP_LOGCONFIG(TAG, "Balboa 9800CP (MSB-first + rising-edge ISR):");
   ESP_LOGCONFIG(TAG, "  clk_gpio: %d", this->clk_gpio_);
   ESP_LOGCONFIG(TAG, "  display_data_gpio (Pin5): %d", this->data_gpio_);
   ESP_LOGCONFIG(TAG, "  control_gpio (Pin3): %d", this->ctrl_in_gpio_);
@@ -125,7 +136,9 @@ void Balboa9800CP::setup() {
 
   gpio_reset_pin(clk);
   gpio_set_direction(clk, GPIO_MODE_INPUT);
-  gpio_set_intr_type(clk, GPIO_INTR_ANYEDGE);
+
+  // IMPORTANT: rising edge only (ANYEDGE will double-sample and break chunk alignment)
+  gpio_set_intr_type(clk, GPIO_INTR_POSEDGE);
 
   gpio_reset_pin(disp);
   gpio_set_direction(disp, GPIO_MODE_INPUT);
@@ -174,12 +187,13 @@ void IRAM_ATTR Balboa9800CP::on_clock_edge_() {
   const uint32_t dt = now - this->last_edge_us_;
   this->last_edge_us_ = now;
 
+  // gap-based frame realignment
   if (dt > this->gap_us_) this->bit_index_ = 0;
 
   const int i = this->bit_index_;
   if (i < 0 || i >= 76) return;
 
-  // Sample BOTH lines on the same clock edge:
+  // Sample BOTH lines on the same rising clock edge:
   this->disp_bits_[i] = gpio_get_level((gpio_num_t) this->data_gpio_) ? 1 : 0;
   this->ctrl_bits_[i] = gpio_get_level((gpio_num_t) this->ctrl_in_gpio_) ? 1 : 0;
 
@@ -232,15 +246,15 @@ void Balboa9800CP::loop() {
 
   if (!last_valid_ || !got) return;
 
-  // Build 6 chunks (LSB-first 7-bit each) from display line
-  const uint8_t d1 = bits_to_u7_lsb_first(last_disp_, 0);
-  const uint8_t d2 = bits_to_u7_lsb_first(last_disp_, 7);
-  const uint8_t d3 = bits_to_u7_lsb_first(last_disp_, 14);
-  const uint8_t d4 = bits_to_u7_lsb_first(last_disp_, 21);
-  const uint8_t stat = bits_to_u7_lsb_first(last_disp_, 28);
-  const uint8_t eq = bits_to_u7_lsb_first(last_disp_, 35);
+  // Build 6 chunks (MSB-first 7-bit each) from display line
+  const uint8_t d1 = bits_to_u7_msb_first(last_disp_, 0);
+  const uint8_t d2 = bits_to_u7_msb_first(last_disp_, 7);
+  const uint8_t d3 = bits_to_u7_msb_first(last_disp_, 14);
+  const uint8_t d4 = bits_to_u7_msb_first(last_disp_, 21);
+  const uint8_t stat = bits_to_u7_msb_first(last_disp_, 28);
+  const uint8_t eq = bits_to_u7_msb_first(last_disp_, 35);
 
-  // Display char order that matches your observed logs: D1, D3, D2, D4
+  // Display char order that matches your observed behavior: D1, D3, D2, D4
   char disp[5];
   disp[0] = seg7_to_char(d1);
   disp[1] = seg7_to_char(d3);
@@ -248,18 +262,18 @@ void Balboa9800CP::loop() {
   disp[3] = seg7_to_char(d4);
   disp[4] = '\0';
 
-  // Bits proven from your logs:
-  const bool pump1 = (eq & 0x20) != 0;  // Pump1
-  const bool pump2 = (eq & 0x10) != 0;  // Pump2
-  const bool light = (eq & 0x08) != 0;  // Light
+  // Pump/Light bits in MSB-first space (reversed from the LSB-space masks)
+  const bool pump1 = (eq & 0x02) != 0;  // Pump1 (LSB-space 0x20)
+  const bool pump2 = (eq & 0x04) != 0;  // Pump2 (LSB-space 0x10)
+  const bool light = (eq & 0x08) != 0;  // Light (symmetric)
 
-  // Best-effort: setpoint indicator observed as STAT bit 0x40 toggling during set temp display
-  const bool showing_setpoint = (stat & 0x40) != 0;
+  // Setpoint indicator: MSB-space equivalent of LSB-space STAT 0x40 is 0x01
+  const bool showing_setpoint = (stat & 0x01) != 0;
 
   // Publish entities
   if (this->display_text_ != nullptr) this->display_text_->publish_state(std::string(disp));
 
-  // Water temp: only publish when we're NOT showing setpoint (so we treat that as "current temp")
+  // Water temp: publish when we believe display is showing CURRENT water temp (not setpoint)
   float tf = 0;
   if (!showing_setpoint && this->water_temp_ != nullptr && parse_temp_f_from_display(disp, &tf)) {
     this->water_temp_->publish_state(tf);
@@ -267,30 +281,30 @@ void Balboa9800CP::loop() {
 
   if (this->set_heat_ != nullptr) this->set_heat_->publish_state(showing_setpoint);
 
-  // Map your YAML sensors to what we now know:
+  // Map YAML entities (current best-known)
   if (this->pump_ != nullptr) this->pump_->publish_state(pump1);     // "Spa Pump" = Pump1
   if (this->jets_ != nullptr) this->jets_->publish_state(pump2);     // "Spa Jets" = Pump2
   if (this->light_ != nullptr) this->light_->publish_state(light);   // Light
 
-  // Leave these as placeholders for now (until we positively identify their bits)
-  if (this->blower_ != nullptr) this->blower_->publish_state((eq & 0x04) != 0);   // guess
-  if (this->heating_ != nullptr) this->heating_->publish_state((eq & 0x01) != 0); // guess
+  // Unknowns (leave conservative)
+  if (this->blower_ != nullptr) this->blower_->publish_state(false);
+  if (this->heating_ != nullptr) this->heating_->publish_state(false);
   if (this->mode_standard_ != nullptr) this->mode_standard_->publish_state(false);
   if (this->temp_up_display_ != nullptr) this->temp_up_display_->publish_state(false);
   if (this->temp_down_display_ != nullptr) this->temp_down_display_->publish_state(false);
   if (this->inverted_ != nullptr) this->inverted_->publish_state(false);
 
-  // Change logging (very similar to what you’re seeing)
+  // Change logging
   static char last_disp_str[5] = "----";
   static uint8_t last_stat = 0xFF;
   static uint8_t last_eq = 0xFF;
 
   if (strncmp(last_disp_str, disp, 4) != 0 || last_stat != stat || last_eq != eq) {
-    ESP_LOGI(TAG, "CHANGE Display=\"%s\"  STAT 0x%02X->0x%02X (xor 0x%02X)  EQ 0x%02X->0x%02X (xor 0x%02X) Pump1=%d",
+    ESP_LOGI(TAG, "CHANGE Display=\"%s\"  STAT 0x%02X->0x%02X (xor 0x%02X)  EQ 0x%02X->0x%02X (xor 0x%02X) P1=%d P2=%d L=%d",
              disp,
              last_stat, stat, (uint8_t)(last_stat ^ stat),
              last_eq, eq, (uint8_t)(last_eq ^ eq),
-             pump1 ? 1 : 0);
+             pump1 ? 1 : 0, pump2 ? 1 : 0, light ? 1 : 0);
 
     last_disp_str[0] = disp[0];
     last_disp_str[1] = disp[1];
@@ -311,11 +325,24 @@ void Balboa9800CP::loop() {
     for (int i = 0; i < FRAME_BITS; i++) bits42[i] = last_disp_[i] ? '1' : '0';
     bits42[FRAME_BITS] = '\0';
 
+    // Also compute LSB-packed chunks for comparison (debug only)
+    const uint8_t d1_l = bits_to_u7_lsb_first(last_disp_, 0);
+    const uint8_t d2_l = bits_to_u7_lsb_first(last_disp_, 7);
+    const uint8_t d3_l = bits_to_u7_lsb_first(last_disp_, 14);
+    const uint8_t d4_l = bits_to_u7_lsb_first(last_disp_, 21);
+    const uint8_t stat_l = bits_to_u7_lsb_first(last_disp_, 28);
+    const uint8_t eq_l = bits_to_u7_lsb_first(last_disp_, 35);
+
     ESP_LOGI(TAG, "DISP(pin5) bits[%d]: %s", FRAME_BITS, bits42);
-    ESP_LOGI(TAG, "Chunks: D1=0x%02X D2=0x%02X D3=0x%02X D4=0x%02X STAT=0x%02X EQ=0x%02X  Display=\"%s\" Pump1=%d",
-             d1, d2, d3, d4, stat, eq, disp, pump1 ? 1 : 0);
+    ESP_LOGI(TAG,
+             "Chunks(MSB): D1=0x%02X D2=0x%02X D3=0x%02X D4=0x%02X STAT=0x%02X EQ=0x%02X  Display=\"%s\" P1=%d P2=%d L=%d",
+             d1, d2, d3, d4, stat, eq, disp, pump1 ? 1 : 0, pump2 ? 1 : 0, light ? 1 : 0);
+    ESP_LOGD(TAG,
+             "Chunks(LSB dbg): D1=0x%02X D2=0x%02X D3=0x%02X D4=0x%02X STAT=0x%02X EQ=0x%02X",
+             d1_l, d2_l, d3_l, d4_l, stat_l, eq_l);
   }
 }
 
 }  // namespace balboa_9800cp
 }  // namespace esphome
+
