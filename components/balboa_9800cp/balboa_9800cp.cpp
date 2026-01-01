@@ -52,38 +52,29 @@ static std::string bits7(uint8_t v) {
 // ✅ Strict 7-seg decoder (no collisions). Patterns are masked to 7 bits.
 static char seg7_to_char(uint8_t pat7) {
   switch (pat7 & 0x7F) {
-    // digits (authoritative)
-    case 0x3F: return '0';
+    // Digits for *your* 9800CP (based on observed frames)
     case 0x06: return '1';
-    case 0x5B: return '2';
+    case 0x7E: return '0';   // observed behaving as 0
+    case 0x6D: return '2';   // observed behaving as 2 (not 5 on your panel)
+
+    // Keep standard mappings we might still see
     case 0x4F: return '3';
     case 0x66: return '4';
-    case 0x6D: return '5';
     case 0x7D: return '6';
     case 0x07: return '7';
     case 0x7F: return '8';
     case 0x6F: return '9';
 
-    // non-ambiguous letters commonly used on spa panels
-    case 0x79: return 'E';
-    case 0x71: return 'F';
-    case 0x73: return 'P';
-    case 0x78: return 't';
-    case 0x3E: return 'U';
-    case 0x6E: return 'Y';
-    case 0x74: return 'h';
-    case 0x54: return 'n';
-    case 0x58: return 'c';
-    case 0x50: return 'r';
-    case 0x5C: return 'o';
+    // Likely trailing unit glyph (often F) on your panel
+    case 0x39: return 'F';
 
-    // dash / blank
     case 0x40: return '-';
     case 0x00: return ' ';
 
     default:   return '?';
   }
 }
+
 
 
 static bool looks_like_set_mode(const std::string &s) {
@@ -295,10 +286,10 @@ void Balboa9800CP::loop() {
   // Decode display (4 chars)
   std::string disp;
   disp.reserve(4);
-  disp.push_back(seg7_to_char(d1));
-  disp.push_back(seg7_to_char(d2));
-  disp.push_back(seg7_to_char(d3));
   disp.push_back(seg7_to_char(d4));
+  disp.push_back(seg7_to_char(d3));
+  disp.push_back(seg7_to_char(d2));
+  disp.push_back(seg7_to_char(d1));
 
   // Publish display
   if (this->display_text_ != nullptr) {
