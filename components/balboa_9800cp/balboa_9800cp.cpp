@@ -32,33 +32,6 @@ static uint8_t prev_eq_ = 0;
 static bool have_last_temp_ = false;
 static float last_temp_f_ = NAN;
 
-// 7-seg reference table (standard “gfedcba” style patterns masked to 7 bits).
-// We match on low 7 bits only, returning ASCII chars.
-static const uint8_t SevenSegmentASCII[96] = {
-  0x00, /* space */ 0x86, /* ! */ 0x22, /* " */ 0x7E, /* # */ 0x6D, /* $ */ 0xD2, /* % */ 0x46, /* & */ 0x20, /* ' */
-  0x29, /* ( */     0x0B, /* ) */ 0x21, /* * */ 0x70, /* + */ 0x10, /* , */ 0x40, /* - */ 0x80, /* . */ 0x52, /* / */
-  0x3F, /* 0 */     0x06, /* 1 */ 0x5B, /* 2 */ 0x4F, /* 3 */ 0x66, /* 4 */ 0x6D, /* 5 */ 0x7D, /* 6 */ 0x07, /* 7 */
-  0x7F, /* 8 */     0x6F, /* 9 */ 0x09, /* : */ 0x0D, /* ; */ 0x61, /* < */ 0x48, /* = */ 0x43, /* > */ 0xD3, /* ? */
-  0x5F, /* @ */     0x77, /* A */ 0x7C, /* B */ 0x39, /* C */ 0x5E, /* D */ 0x79, /* E */ 0x71, /* F */ 0x3D, /* G */
-  0x76, /* H */     0x30, /* I */ 0x1E, /* J */ 0x75, /* K */ 0x38, /* L */ 0x15, /* M */ 0x37, /* N */ 0x3F, /* O */
-  0x73, /* P */     0x6B, /* Q */ 0x33, /* R */ 0x6D, /* S */ 0x78, /* T */ 0x3E, /* U */ 0x3E, /* V */ 0x2A, /* W */
-  0x76, /* X */     0x6E, /* Y */ 0x5B, /* Z */ 0x39, /* [ */ 0x64, /* \ */ 0x0F, /* ] */ 0x23, /* ^ */ 0x08, /* _ */
-  0x02, /* ` */     0x5F, /* a */ 0x7C, /* b */ 0x58, /* c */ 0x5E, /* d */ 0x7B, /* e */ 0x71, /* f */ 0x6F, /* g */
-  0x74, /* h */     0x10, /* i */ 0x0C, /* j */ 0x75, /* k */ 0x30, /* l */ 0x14, /* m */ 0x54, /* n */ 0x5C, /* o */
-  0x73, /* p */     0x67, /* q */ 0x50, /* r */ 0x6D, /* s */ 0x78, /* t */ 0x1C, /* u */ 0x1C, /* v */ 0x14, /* w */
-  0x76, /* x */     0x6E, /* y */ 0x5B, /* z */ 0x46, /* { */ 0x30, /* | */ 0x70, /* } */ 0x01, /* ~ */ 0x00  /* del */
-};
-
-static char seg7_to_char(uint8_t pat7) {
-  const uint8_t p = pat7 & 0x7F;
-  for (int i = 0; i < 96; i++) {
-    if ((SevenSegmentASCII[i] & 0x7F) == p) {
-      return static_cast<char>(i + 32);
-    }
-  }
-  return '?';
-}
-
 // Pack 7 bits MSB-first from bit array: bits[start+0] becomes bit6 ... bits[start+6] becomes bit0
 static uint8_t pack7_msb(const uint8_t *bits, int start) {
   uint8_t v = 0;
@@ -76,6 +49,47 @@ static std::string bits7(uint8_t v) {
   return s;
 }
 
+// ✅ Strict 7-seg decoder (no collisions). Patterns are masked to 7 bits.
+static char seg7_to_char(uint8_t pat7) {
+  switch (pat7 & 0x7F) {
+    // digits
+    case 0x3F: return '0';
+    case 0x06: return '1';
+    case 0x5B: return '2';
+    case 0x4F: return '3';
+    case 0x66: return '4';
+    case 0x6D: return '5';
+    case 0x7D: return '6';
+    case 0x07: return '7';
+    case 0x7F: return '8';
+    case 0x6F: return '9';
+
+    // common letters seen on spa panels (approximate glyphs)
+    case 0x77: return 'A';
+    case 0x7C: return 'b';
+    case 0x39: return 'C';
+    case 0x5E: return 'd';
+    case 0x79: return 'E';
+    case 0x71: return 'F';
+    case 0x73: return 'P';
+    case 0x6D: return 'S';
+    case 0x78: return 't';
+    case 0x3E: return 'U';
+    case 0x6E: return 'Y';
+    case 0x54: return 'n';
+    case 0x58: return 'c';
+    case 0x50: return 'r';
+    case 0x5C: return 'o';
+    case 0x74: return 'h';
+
+    // dash / blank
+    case 0x40: return '-';
+    case 0x00: return ' ';
+
+    default:   return '?';
+  }
+}
+
 static bool looks_like_set_mode(const std::string &s) {
   bool has_s = false, has_e = false, has_t = false;
   for (char c : s) {
@@ -88,6 +102,7 @@ static bool looks_like_set_mode(const std::string &s) {
 }
 
 static bool parse_reasonable_temp_f(const std::string &s, int &out_temp) {
+  // Extract digits from the 4-char display.
   int digits[4];
   int n = 0;
   for (char c : s) {
@@ -102,6 +117,7 @@ static bool parse_reasonable_temp_f(const std::string &s, int &out_temp) {
 
   // Typical spa water temps in F.
   if (val < 50 || val > 120) return false;
+
   out_temp = val;
   return true;
 }
@@ -121,7 +137,7 @@ void Balboa9800CP::set_pins(GPIOPin *clk, GPIOPin *data, GPIOPin *ctrl_in, GPIOP
 }
 
 void Balboa9800CP::dump_config() {
-  ESP_LOGCONFIG(TAG, "Balboa 9800CP (corrected capture + diff logger):");
+  ESP_LOGCONFIG(TAG, "Balboa 9800CP (strict seg7 + Pump1 bit):");
   ESP_LOGCONFIG(TAG, "  clk_gpio: %d", this->clk_gpio_);
   ESP_LOGCONFIG(TAG, "  display_data_gpio: %d", this->data_gpio_);
   ESP_LOGCONFIG(TAG, "  ctrl_in_gpio: %d", this->ctrl_in_gpio_);
@@ -153,7 +169,7 @@ void Balboa9800CP::setup() {
   gpio_reset_pin(clk);
   gpio_set_direction(clk, GPIO_MODE_INPUT);
 
-  // ✅ CRITICAL FIX: rising edge only (one sample per clock pulse)
+  // ✅ CRITICAL: rising edge only (one sample per clock pulse)
   gpio_set_intr_type(clk, GPIO_INTR_POSEDGE);
 
   gpio_reset_pin(disp);
@@ -208,19 +224,19 @@ void IRAM_ATTR Balboa9800CP::on_clock_edge_() {
   const uint32_t dt = now - this->last_edge_us_;
   this->last_edge_us_ = now;
 
-  // Resync on long idle gap: start a new frame.
+  // Resync on long idle gap: start a new frame
   if (dt > this->gap_us_) {
     this->bit_index_ = 0;
-    this->frame_ready_ = false;  // ✅ important so capture resumes immediately
+    this->frame_ready_ = false;  // ensure capture resumes
   }
 
-  // ✅ Frame-freeze guard: don’t overwrite until we see a resync gap
+  // Frame-freeze guard: don’t overwrite until next resync gap
   if (this->frame_ready_) return;
 
   const int i = this->bit_index_;
   if (i < 0 || i >= FRAME_BITS) return;
 
-  // Sample both lines on the same rising edge
+  // Sample both lines on same rising edge
   this->disp_bits_[i] = gpio_get_level((gpio_num_t) this->data_gpio_) ? 1 : 0;
   this->ctrl_bits_[i] = gpio_get_level((gpio_num_t) this->ctrl_in_gpio_) ? 1 : 0;
 
@@ -235,7 +251,7 @@ void IRAM_ATTR Balboa9800CP::on_clock_edge_() {
 
 void Balboa9800CP::queue_command(uint8_t cmd) {
   (void) cmd;
-  // Injection still disabled in this step.
+  // Injection disabled for now (next step).
 }
 
 void Balboa9800CP::loop() {
@@ -260,7 +276,7 @@ void Balboa9800CP::loop() {
       last_ctrl_[i] = this->ctrl_bits_[i];
     }
     last_valid_ = true;
-    this->frame_ready_ = false;  // allow next frame after resync gap
+    this->frame_ready_ = false;
     got_frame = true;
   }
   portEXIT_CRITICAL(&balboa_mux);
@@ -293,7 +309,7 @@ void Balboa9800CP::loop() {
     this->display_text_->publish_state(disp);
   }
 
-  // Publish temp only when numeric-looking; otherwise keep last
+  // Publish temp only when numeric; otherwise keep last
   if (this->water_temp_ != nullptr) {
     int temp_f = 0;
     if (parse_reasonable_temp_f(disp, temp_f)) {
@@ -301,36 +317,43 @@ void Balboa9800CP::loop() {
       have_last_temp_ = true;
       this->water_temp_->publish_state(last_temp_f_);
     } else {
-      // keep last known temp; do not clear in HA
-      if (have_last_temp_) {
-        // optional: you can republish occasionally if you want, but not necessary
-      }
+      // keep last known temp in HA
     }
   }
 
-  // “Set heat” heuristic (display shows SET/SEt/etc)
+  // "Set heat" heuristic
   const bool set_heat = looks_like_set_mode(disp);
-
-  // For now: do NOT hard-map EQ/STAT to pumps/etc until we see real changes.
-  // Instead, publish “best effort” and focus on diff logging to learn mapping.
-  // You can still wire a few obvious items later after we correlate flips.
   if (this->set_heat_ != nullptr) this->set_heat_->publish_state(set_heat);
 
-  // --- Diff logging: print STAT/EQ changes and which bits flipped ---
+  // ✅ Pump1 bit confirmed from your diff: EQ bit 0x20 flips with Pump1
+  const bool pump1_on = (eq & 0x20) != 0;
+  if (this->pump_ != nullptr) this->pump_->publish_state(pump1_on);
+
+  // Keep other binary sensors publishing “unknown/false” until we map them:
+  if (this->heating_ != nullptr) this->heating_->publish_state(false);
+  if (this->light_ != nullptr) this->light_->publish_state(false);
+  if (this->jets_ != nullptr) this->jets_->publish_state(false);
+  if (this->blower_ != nullptr) this->blower_->publish_state(false);
+  if (this->mode_standard_ != nullptr) this->mode_standard_->publish_state(false);
+  if (this->temp_up_display_ != nullptr) this->temp_up_display_->publish_state(false);
+  if (this->temp_down_display_ != nullptr) this->temp_down_display_->publish_state(false);
+  if (this->inverted_ != nullptr) this->inverted_->publish_state(false);
+
+  // Diff logging: STAT/EQ changes and which bits flipped
   if (got_frame) {
     if (!have_prev_stat_eq_) {
       have_prev_stat_eq_ = true;
       prev_stat_ = stat;
       prev_eq_ = eq;
-      ESP_LOGI(TAG, "Initial STAT=0x%02X (%s)  EQ=0x%02X (%s)  Display=\"%s\"",
-               stat, bits7(stat).c_str(), eq, bits7(eq).c_str(), disp.c_str());
+      ESP_LOGI(TAG, "Initial STAT=0x%02X (%s)  EQ=0x%02X (%s)  Display=\"%s\" Pump1=%d",
+               stat, bits7(stat).c_str(), eq, bits7(eq).c_str(), disp.c_str(), (int) pump1_on);
     } else {
       const uint8_t dstat = (uint8_t) (prev_stat_ ^ stat);
       const uint8_t deq   = (uint8_t) (prev_eq_ ^ eq);
 
       if (dstat != 0 || deq != 0) {
-        ESP_LOGI(TAG, "CHANGE Display=\"%s\"  STAT 0x%02X->0x%02X (xor 0x%02X)  EQ 0x%02X->0x%02X (xor 0x%02X)",
-                 disp.c_str(), prev_stat_, stat, dstat, prev_eq_, eq, deq);
+        ESP_LOGI(TAG, "CHANGE Display=\"%s\"  STAT 0x%02X->0x%02X (xor 0x%02X)  EQ 0x%02X->0x%02X (xor 0x%02X) Pump1=%d",
+                 disp.c_str(), prev_stat_, stat, dstat, prev_eq_, eq, deq, (int) pump1_on);
 
         if (dstat != 0) {
           ESP_LOGI(TAG, "  STAT bits old=%s new=%s",
@@ -347,7 +370,7 @@ void Balboa9800CP::loop() {
     }
   }
 
-  // Optional: still print full raw frame once per second for sanity
+  // Optional: raw frame once/sec
   static uint32_t last_dbg_ms = 0;
   if (now - last_dbg_ms >= 1000) {
     last_dbg_ms = now;
@@ -363,13 +386,13 @@ void Balboa9800CP::loop() {
 
     ESP_LOGI(TAG, "DISP(pin5) bits[%d]: %s", FRAME_BITS, disp_bits_str);
     ESP_LOGI(TAG, "CTRL(pin3) bits[%d]: %s", FRAME_BITS, ctrl_bits_str);
-    ESP_LOGI(TAG, "Chunks: D1=0x%02X D2=0x%02X D3=0x%02X D4=0x%02X STAT=0x%02X EQ=0x%02X  Display=\"%s\"",
-             d1, d2, d3, d4, stat, eq, disp.c_str());
+    ESP_LOGI(TAG, "Chunks: D1=0x%02X D2=0x%02X D3=0x%02X D4=0x%02X STAT=0x%02X EQ=0x%02X  Display=\"%s\" Pump1=%d",
+             d1, d2, d3, d4, stat, eq, disp.c_str(), (int) pump1_on);
   }
 }
 
 void Balboa9800CP::process_frame_() {
-  // Not used (processing happens in loop() using cached frame)
+  // Not used
 }
 
 }  // namespace balboa_9800cp
