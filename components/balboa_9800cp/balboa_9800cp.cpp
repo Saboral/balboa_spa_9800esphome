@@ -59,7 +59,7 @@ void Balboa9800CP::setup() {
 
   gpio_reset_pin(clk);
   gpio_set_direction(clk, GPIO_MODE_INPUT);
-  gpio_set_intr_type(clk, GPIO_INTR_ANYEDGE);
+  gpio_set_intr_type(clk, GPIO_INTR_POSEDGE); // rising edge only
 
   gpio_reset_pin(disp);
   gpio_set_direction(disp, GPIO_MODE_INPUT);
