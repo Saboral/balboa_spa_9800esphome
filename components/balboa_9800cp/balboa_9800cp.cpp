@@ -52,7 +52,7 @@ static std::string bits7(uint8_t v) {
 // ✅ Strict 7-seg decoder (no collisions). Patterns are masked to 7 bits.
 static char seg7_to_char(uint8_t pat7) {
   switch (pat7 & 0x7F) {
-    // digits
+    // digits (authoritative)
     case 0x3F: return '0';
     case 0x06: return '1';
     case 0x5B: return '2';
@@ -64,23 +64,18 @@ static char seg7_to_char(uint8_t pat7) {
     case 0x7F: return '8';
     case 0x6F: return '9';
 
-    // common letters seen on spa panels (approximate glyphs)
-    case 0x77: return 'A';
-    case 0x7C: return 'b';
-    case 0x39: return 'C';
-    case 0x5E: return 'd';
+    // non-ambiguous letters commonly used on spa panels
     case 0x79: return 'E';
     case 0x71: return 'F';
     case 0x73: return 'P';
-    case 0x6D: return 'S';
     case 0x78: return 't';
     case 0x3E: return 'U';
     case 0x6E: return 'Y';
+    case 0x74: return 'h';
     case 0x54: return 'n';
     case 0x58: return 'c';
     case 0x50: return 'r';
     case 0x5C: return 'o';
-    case 0x74: return 'h';
 
     // dash / blank
     case 0x40: return '-';
@@ -89,6 +84,7 @@ static char seg7_to_char(uint8_t pat7) {
     default:   return '?';
   }
 }
+
 
 static bool looks_like_set_mode(const std::string &s) {
   bool has_s = false, has_e = false, has_t = false;
