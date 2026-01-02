@@ -28,7 +28,7 @@ class BalboaButton : public button::Button {
   Balboa9800CP *parent_{nullptr};
 };
 
-class BalboaToggleSwitch : public switch_::Switch {
+class BalboaToggleSwitch : public switch_::Switch, public Component {
  public:
   void set_command(uint8_t cmd) { this->cmd_ = cmd; }
   void set_parent(Balboa9800CP *p) { this->parent_ = p; }
@@ -41,7 +41,7 @@ class BalboaToggleSwitch : public switch_::Switch {
   Balboa9800CP *parent_{nullptr};
 };
 
-class BalboaSetpointNumber : public number::Number {
+class BalboaSetpointNumber : public number::Number, public Component {
  public:
   void set_parent(Balboa9800CP *p) { this->parent_ = p; }
 
@@ -84,12 +84,12 @@ class Balboa9800CP : public Component {
   void set_light_sensor(binary_sensor::BinarySensor *s) { this->light_ = s; }
 
   // NEW: Switches (control + state from bits 36/37/38)
-  void set_pump1_switch(switch_::Switch *s) { this->pump1_switch_ = s; }
-  void set_pump2_switch(switch_::Switch *s) { this->pump2_switch_ = s; }
-  void set_blower_switch(switch_::Switch *s) { this->blower_switch_ = s; }
+  void set_pump1_switch(switch_::Switch *s) { this->pump1_switch_ = s; if (s != nullptr) static_cast<BalboaToggleSwitch*>(s)->set_parent(this); }
+  void set_pump2_switch(switch_::Switch *s) { this->pump2_switch_ = s; if (s != nullptr) static_cast<BalboaToggleSwitch*>(s)->set_parent(this); }
+  void set_blower_switch(switch_::Switch *s) { this->blower_switch_ = s; if (s != nullptr) static_cast<BalboaToggleSwitch*>(s)->set_parent(this); }
 
   // NEW: Setpoint number (80-104F, 1F steps). control() triggers sync/adjust sequence.
-  void set_setpoint_number(number::Number *n) { this->setpoint_number_ = n; }
+  void set_setpoint_number(number::Number *n) { this->setpoint_number_ = n; if (n != nullptr) static_cast<BalboaSetpointNumber*>(n)->set_parent(this); }
 
   void setup() override;
   void loop() override;
