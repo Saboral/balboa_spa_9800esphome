@@ -264,7 +264,12 @@ void Balboa9800CP::setup() {
   gpio_set_direction(clk, GPIO_MODE_INPUT);
 
   // ✅ CRITICAL: rising edge only (one sample per clock pulse)
-  gpio_set_intr_type(clk, GPIO_INTR_POSEDGE);
+  // The working Balboa_GS_Interface implementation triggers on CHANGE and:
+  //  - forces ctrl_out LOW on clock LOW
+  //  - sets ctrl_out for bits 39..41 on clock HIGH
+  //  - samples display/ctrl bits on clock HIGH
+  // Using ANYEDGE here lets us mirror that timing.
+  gpio_set_intr_type(clk, GPIO_INTR_ANYEDGE);
 
   gpio_reset_pin(disp);
   gpio_set_direction(disp, GPIO_MODE_INPUT);
@@ -272,12 +277,14 @@ void Balboa9800CP::setup() {
   gpio_reset_pin(ctrl);
   gpio_set_direction(ctrl, GPIO_MODE_INPUT);
 
-  // ctrl_out drives 3-bit command during bit indices 39-41
-  // Use open-drain so '1' releases the line (pulled up externally / via internal pullup).
+  // ctrl_out drives 3-bit command during bit indices 39-41.
+  // Mirror the known-working reference implementation:
+  //   - ctrl_out is driven LOW whenever CLK is LOW
+  //   - ctrl_out is driven HIGH/LOW only during CLK HIGH for bits 39..41
+  // This behaves like "gating" the command bits onto the high phase of the clock.
   gpio_reset_pin(out);
-  gpio_set_pull_mode(out, GPIO_PULLUP_ONLY);
-  gpio_set_direction(out, GPIO_MODE_OUTPUT_OD);
-  gpio_set_level(out, 1);
+  gpio_set_direction(out, GPIO_MODE_OUTPUT);
+  gpio_set_level(out, 0);
 static bool installed = false;
   if (!installed) {
     esp_err_t e = gpio_install_isr_service(ESP_INTR_FLAG_IRAM);
@@ -304,12 +311,12 @@ static bool installed = false;
   have_last_temp_ = false;
   last_temp_f_ = NAN;
 
-  ESP_LOGI(TAG, "ISR attached (POSEDGE). clk=%d disp=%d ctrl_in=%d ctrl_out=%d",
+  ESP_LOGI(TAG, "ISR attached (ANYEDGE). clk=%d disp=%d ctrl_in=%d ctrl_out=%d",
            this->clk_gpio_, this->data_gpio_, this->ctrl_in_gpio_, this->ctrl_out_gpio_);
 
-  // Start with clock interrupt disabled; loop() will enable during sampling windows
-  gpio_intr_disable(clk);
-  capture_enabled = false;
+  // Always capture (and inject) on every frame.
+  gpio_intr_enable(clk);
+  capture_enabled = true;
 }
 
 void IRAM_ATTR Balboa9800CP::isr_router_() {
@@ -320,6 +327,16 @@ void IRAM_ATTR Balboa9800CP::isr_router_() {
 void IRAM_ATTR Balboa9800CP::on_clock_edge_() {
   if (!capture_enabled) return;
   this->isr_edge_count_++;
+
+  // Mirror reference behavior: on CLK LOW, force ctrl_out LOW and do nothing else.
+  const int clk_level = gpio_get_level((gpio_num_t) this->clk_gpio_);
+  if (this->ctrl_out_gpio_ >= 0 && clk_level == 0) {
+    gpio_set_level((gpio_num_t) this->ctrl_out_gpio_, 0);
+    return;
+  }
+
+  // Only process bits on the HIGH phase.
+  if (clk_level == 0) return;
 
   const uint32_t now = micros();
   const uint32_t dt = now - this->last_edge_us_;
@@ -337,14 +354,13 @@ void IRAM_ATTR Balboa9800CP::on_clock_edge_() {
   const int i = this->bit_index_;
   if (i < 0 || i >= FRAME_BITS) return;
 
-  // Command injection: drive ctrl_out only at bit indices 39-41 (b39,b40,b41).
-  // IMPORTANT: Set this early in the ISR to maximize setup time before the spa samples.
-  // Line is open-drain; '1' releases (idle/high), '0' pulls low.
+  // Command injection (bits 39..41 during CLK HIGH).
+  // If not actively pressing, keep line LOW (reference implementation does this).
   if (this->ctrl_out_gpio_ >= 0) {
-    int out_level = 1;  // idle = released/high
+    int out_level = 0;
     if (this->press_active_ && i >= 39 && i <= 41) {
       const uint8_t bits = cmd_bits_3(this->active_cmd_);
-      // Map i=39->MSB (bit2), i=40->bit1, i=41->LSB (bit0)
+      // Map i=39->bit2, i=40->bit1, i=41->bit0
       const uint8_t shift = (uint8_t) (41 - i);
       out_level = (bits >> shift) & 0x01;
     }
@@ -398,42 +414,9 @@ void Balboa9800CP::loop() {
   // Service queued commands (enforces inter-press delay)
   this->service_command_queue_();
 
-  // -----------------------------------------------------------------------
-  // Intermittent sampling scheduler:
-  // Enable clock interrupt briefly to capture one frame, then disable.
-  // -----------------------------------------------------------------------
-  static uint32_t next_sample_ms = 0;
-  static uint32_t capture_start_ms = 0;
-
-  if (!capture_enabled && now >= next_sample_ms) {
-    capture_enabled = true;
-    capture_start_ms = now;
-
-    // Reset capture state for a fresh frame
-    portENTER_CRITICAL(&balboa_mux);
-    this->bit_index_ = 0;
-    this->frame_ready_ = false;
-    portEXIT_CRITICAL(&balboa_mux);
-
-    gpio_intr_enable((gpio_num_t) this->clk_gpio_);
-  }
-
-  if (capture_enabled) {
-    bool done = false;
-    portENTER_CRITICAL(&balboa_mux);
-    done = this->frame_ready_;
-    portEXIT_CRITICAL(&balboa_mux);
-
-    const bool command_active =
-        (this->press_active_) || (!this->queue_empty_()) ||
-        this->setpoint_sync_active_ || this->awaiting_setpoint_read_ || (this->pending_adjust_presses_ != 0);
-
-    if ((done || (now - capture_start_ms) > CAPTURE_TIMEOUT_MS) && !command_active) {
-      gpio_intr_disable((gpio_num_t) this->clk_gpio_);
-      capture_enabled = false;
-      next_sample_ms = now + SAMPLE_INTERVAL_MS;
-    }
-  }
+  // We keep the clock interrupt enabled all the time.
+  // This is necessary for reliable command injection at bit indices 39..41
+  // and mirrors the known-working reference implementation.
 
   // 1 Hz edge counter
   static uint32_t last_edges_ms = 0;
