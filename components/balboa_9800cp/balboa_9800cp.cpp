@@ -273,11 +273,12 @@ void Balboa9800CP::setup() {
   gpio_set_direction(ctrl, GPIO_MODE_INPUT);
 
   // ctrl_out drives 3-bit command during bit indices 39-41
+  // Use open-drain so '1' releases the line (pulled up externally / via internal pullup).
   gpio_reset_pin(out);
-  gpio_set_direction(out, GPIO_MODE_OUTPUT);
-  gpio_set_level(out, 0);
-
-  static bool installed = false;
+  gpio_set_pull_mode(out, GPIO_PULLUP_ONLY);
+  gpio_set_direction(out, GPIO_MODE_OUTPUT_OD);
+  gpio_set_level(out, 1);
+static bool installed = false;
   if (!installed) {
     esp_err_t e = gpio_install_isr_service(ESP_INTR_FLAG_IRAM);
     if (e != ESP_OK && e != ESP_ERR_INVALID_STATE) {
@@ -336,14 +337,11 @@ void IRAM_ATTR Balboa9800CP::on_clock_edge_() {
   const int i = this->bit_index_;
   if (i < 0 || i >= FRAME_BITS) return;
 
-  // Sample both lines on same rising edge
-  this->disp_bits_[i] = gpio_get_level((gpio_num_t) this->data_gpio_) ? 1 : 0;
-  this->ctrl_bits_[i] = gpio_get_level((gpio_num_t) this->ctrl_in_gpio_) ? 1 : 0;
-
   // Command injection: drive ctrl_out only at bit indices 39-41 (b39,b40,b41).
-  // Outside those indices, keep line low (idle).
+  // IMPORTANT: Set this early in the ISR to maximize setup time before the spa samples.
+  // Line is open-drain; '1' releases (idle/high), '0' pulls low.
   if (this->ctrl_out_gpio_ >= 0) {
-    int out_level = 0;
+    int out_level = 1;  // idle = released/high
     if (this->pending_frames_left_ > 0 && i >= 39 && i <= 41) {
       const uint8_t bits = cmd_bits_3(this->pending_cmd_);
       // Map i=39->MSB (bit2), i=40->bit1, i=41->LSB (bit0)
@@ -352,6 +350,10 @@ void IRAM_ATTR Balboa9800CP::on_clock_edge_() {
     }
     gpio_set_level((gpio_num_t) this->ctrl_out_gpio_, out_level);
   }
+
+  // Sample both lines on same rising edge
+  this->disp_bits_[i] = gpio_get_level((gpio_num_t) this->data_gpio_) ? 1 : 0;
+  this->ctrl_bits_[i] = gpio_get_level((gpio_num_t) this->ctrl_in_gpio_) ? 1 : 0;
 
   this->bit_index_++;
 
