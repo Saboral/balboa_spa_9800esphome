@@ -3,7 +3,7 @@
   "name": "Balboa 9800CP (SpaBerry bus)",
   "version": "1.0.0",
   "documentation": "https://github.com/Saboral/balboa_spa_9800esphome",
-  "dependencies": [],
+  "dependencies": ["button"],
   "codeowners": ["@Saboral"],
   "requirements": []
 }
