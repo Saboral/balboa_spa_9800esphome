@@ -1,4 +1,4 @@
-#include "balboa_9800cp_updated.h"
+#include "balboa_9800cp.h"
 #include "esphome/core/log.h"
 
 #include <Arduino.h>
