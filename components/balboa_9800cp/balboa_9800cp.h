@@ -128,7 +128,6 @@ class Balboa9800CP : public Component {
   uint8_t press_frames_{6};
 
   // Injection state (not used in dual-stream logger build, kept for later)
-  volatile uint8_t pending_cmd_{0};
   volatile uint8_t frames_left_{0};
   volatile bool release_frame_{false};
 
