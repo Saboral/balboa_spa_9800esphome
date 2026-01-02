@@ -22,7 +22,7 @@ external_components:
   - source:
       type: git
       url: https://github.com/Saboral/balboa_spa_9800esphome/
-      ref: d83dc52ba4b6accb795185166591548e2b820445
+      ref: 3a362f1dbd32dfd93e1bdfb46c83f9156a8a9daa
     components: [ balboa_9800cp ]
 
 balboa_9800cp:
