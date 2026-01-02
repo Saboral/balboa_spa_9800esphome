@@ -3,6 +3,8 @@ import esphome.config_validation as cv
 from esphome import pins
 from esphome.const import CONF_ID, CONF_NUMBER
 
+DEPENDENCIES = ["button"]
+
 CODEOWNERS = ["@Saboral"]
 
 balboa_ns = cg.esphome_ns.namespace("balboa_9800cp")
