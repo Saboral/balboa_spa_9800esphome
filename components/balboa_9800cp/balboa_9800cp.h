@@ -30,7 +30,12 @@ class BalboaButton : public button::Button {
 
 class BalboaToggleSwitch : public switch_::Switch, public Component {
  public:
+  // ESPHome codegen calls set_kind(5/6/7); treat that as the command id.
+  void set_kind(uint8_t kind) { this->cmd_ = kind; }
+
+  // Back-compat if you ever set it as a command explicitly
   void set_command(uint8_t cmd) { this->cmd_ = cmd; }
+
   void set_parent(Balboa9800CP *p) { this->parent_ = p; }
 
  protected:
@@ -84,12 +89,12 @@ class Balboa9800CP : public Component {
   void set_light_sensor(binary_sensor::BinarySensor *s) { this->light_ = s; }
 
   // NEW: Switches (control + state from bits 36/37/38)
-  void set_pump1_switch(switch_::Switch *s) { this->pump1_switch_ = s; if (s != nullptr) static_cast<BalboaToggleSwitch*>(s)->set_parent(this); }
-  void set_pump2_switch(switch_::Switch *s) { this->pump2_switch_ = s; if (s != nullptr) static_cast<BalboaToggleSwitch*>(s)->set_parent(this); }
-  void set_blower_switch(switch_::Switch *s) { this->blower_switch_ = s; if (s != nullptr) static_cast<BalboaToggleSwitch*>(s)->set_parent(this); }
+  void set_pump1_switch(switch_::Switch *s) { this->pump1_switch_ = s; }
+  void set_pump2_switch(switch_::Switch *s) { this->pump2_switch_ = s; }
+  void set_blower_switch(switch_::Switch *s) { this->blower_switch_ = s; }
 
   // NEW: Setpoint number (80-104F, 1F steps). control() triggers sync/adjust sequence.
-  void set_setpoint_number(number::Number *n) { this->setpoint_number_ = n; if (n != nullptr) static_cast<BalboaSetpointNumber*>(n)->set_parent(this); }
+  void set_setpoint_number(number::Number *n) { this->setpoint_number_ = n; }
 
   void setup() override;
   void loop() override;
