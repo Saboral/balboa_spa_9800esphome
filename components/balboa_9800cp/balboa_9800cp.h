@@ -5,6 +5,8 @@
 
 #include "esphome/components/binary_sensor/binary_sensor.h"
 #include "esphome/components/button/button.h"
+#include "esphome/components/switch/switch.h"
+#include "esphome/components/number/number.h"
 #include "esphome/components/sensor/sensor.h"
 #include "esphome/components/text_sensor/text_sensor.h"
 
@@ -25,6 +27,31 @@ class BalboaButton : public button::Button {
   uint8_t cmd_{0};
   Balboa9800CP *parent_{nullptr};
 };
+
+class BalboaToggleSwitch : public switch_::Switch {
+ public:
+  void set_command(uint8_t cmd) { this->cmd_ = cmd; }
+  void set_parent(Balboa9800CP *p) { this->parent_ = p; }
+
+ protected:
+  void write_state(bool state) override;
+
+ private:
+  uint8_t cmd_{0};
+  Balboa9800CP *parent_{nullptr};
+};
+
+class BalboaSetpointNumber : public number::Number {
+ public:
+  void set_parent(Balboa9800CP *p) { this->parent_ = p; }
+
+ protected:
+  void control(float value) override;
+
+ private:
+  Balboa9800CP *parent_{nullptr};
+};
+
 
 class Balboa9800CP : public Component {
  public:
@@ -56,11 +83,22 @@ class Balboa9800CP : public Component {
   void set_jets_sensor(binary_sensor::BinarySensor *s) { this->jets_ = s; }
   void set_light_sensor(binary_sensor::BinarySensor *s) { this->light_ = s; }
 
+  // NEW: Switches (control + state from bits 36/37/38)
+  void set_pump1_switch(switch_::Switch *s) { this->pump1_switch_ = s; }
+  void set_pump2_switch(switch_::Switch *s) { this->pump2_switch_ = s; }
+  void set_blower_switch(switch_::Switch *s) { this->blower_switch_ = s; }
+
+  // NEW: Setpoint number (80-104F, 1F steps). control() triggers sync/adjust sequence.
+  void set_setpoint_number(number::Number *n) { this->setpoint_number_ = n; }
+
   void setup() override;
   void loop() override;
   void dump_config() override;
 
   void queue_command(uint8_t cmd);
+
+  // NEW: Setpoint control request (invoked by BalboaSetpointNumber)
+  void request_setpoint_(int target_f);
 
  protected:
   static void isr_router_();
@@ -113,6 +151,27 @@ class Balboa9800CP : public Component {
   binary_sensor::BinarySensor *pump_{nullptr};
   binary_sensor::BinarySensor *jets_{nullptr};
   binary_sensor::BinarySensor *light_{nullptr};
+
+  // ---- NEW: control entities ----
+  switch_::Switch *pump1_switch_{nullptr};
+  switch_::Switch *pump2_switch_{nullptr};
+  switch_::Switch *blower_switch_{nullptr};
+  number::Number *setpoint_number_{nullptr};
+
+  // ---- NEW: command injection state ----
+  volatile uint8_t pending_cmd_{0};
+  volatile uint8_t pending_frames_left_{0};
+  uint32_t last_cmd_ms_{0};
+  uint32_t last_temp_cmd_ms_{0};
+
+  // ---- NEW: setpoint sync/adjust state ----
+  bool setpoint_sync_active_{false};
+  bool awaiting_setpoint_read_{false};
+  int target_setpoint_f_{0};
+  int current_setpoint_f_{0};
+  bool current_setpoint_valid_{false};
+  int pending_adjust_presses_{0};
+  uint32_t next_adjust_ms_{0};
 };
 
 }  // namespace balboa_9800cp

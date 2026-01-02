@@ -1,10 +1,11 @@
-#include "balboa_9800cp.h"
+#include "balboa_9800cp_updated.h"
 #include "esphome/core/log.h"
 
 #include <Arduino.h>
 #include "driver/gpio.h"
 #include <ctype.h>
 #include <string>
+#include <cmath>
 
 namespace esphome {
 namespace balboa_9800cp {
@@ -13,6 +14,30 @@ static const char *const TAG = "balboa_9800cp";
 
 Balboa9800CP *Balboa9800CP::instance_ = nullptr;
 static portMUX_TYPE balboa_mux = portMUX_INITIALIZER_UNLOCKED;
+
+
+// ---- Control command encoding (Balboa GS 3-bit command @ bit indices 39-41) ----
+static constexpr uint8_t CMD_NONE      = 0;
+static constexpr uint8_t CMD_MODE      = 1;  // 001
+static constexpr uint8_t CMD_TEMP_UP   = 2;  // 100
+static constexpr uint8_t CMD_TEMP_DOWN = 3;  // 101
+static constexpr uint8_t CMD_LIGHT     = 4;  // 011
+static constexpr uint8_t CMD_PUMP1     = 5;  // 110
+static constexpr uint8_t CMD_PUMP2     = 6;  // 010
+static constexpr uint8_t CMD_BLOWER    = 7;  // 111
+
+static inline uint8_t cmd_bits_3(uint8_t cmd) {
+  switch (cmd) {
+    case CMD_MODE:      return 0b001;
+    case CMD_TEMP_UP:   return 0b100;
+    case CMD_TEMP_DOWN: return 0b101;
+    case CMD_LIGHT:     return 0b011;
+    case CMD_PUMP1:     return 0b110;
+    case CMD_PUMP2:     return 0b010;
+    case CMD_BLOWER:    return 0b111;
+    default:            return 0b000;
+  }
+}
 
 // ---- Protocol constants ----
 static constexpr int FRAME_BITS = 42;   // 6 chunks * 7 bits
@@ -170,6 +195,33 @@ void BalboaButton::press_action() {
     this->parent_->queue_command(this->cmd_);
 }
 
+
+// ---------------- Switches ----------------
+void BalboaToggleSwitch::write_state(bool state) {
+  // The spa buttons toggle; we only press if requested state differs from actual state.
+  if (this->parent_ == nullptr) return;
+
+  // Use last-known published state from ESPHome base class.
+  // If we don't have feedback yet, still send a press and let feedback correct us.
+  if (state != this->state) {
+    this->parent_->queue_command(this->cmd_);
+  }
+  // Optimistic publish; next frame will correct if needed.
+  this->publish_state(state);
+}
+
+// ---------------- Setpoint number ----------------
+void BalboaSetpointNumber::control(float value) {
+  if (this->parent_ == nullptr) return;
+
+  // Clamp and round to 1°F steps (80–104°F).
+  int target = (int) lroundf(value);
+  if (target < 80) target = 80;
+  if (target > 104) target = 104;
+
+  this->parent_->request_setpoint_(target);
+}
+
 // ---------------- Component ----------------
 void Balboa9800CP::set_pins(GPIOPin *clk, GPIOPin *data, GPIOPin *ctrl_in, GPIOPin *ctrl_out) {
   this->clk_ = clk;
@@ -220,9 +272,10 @@ void Balboa9800CP::setup() {
   gpio_reset_pin(ctrl);
   gpio_set_direction(ctrl, GPIO_MODE_INPUT);
 
-  // Keep ctrl_out high-Z for now (button injection later)
+  // ctrl_out drives 3-bit command during bit indices 39-41
   gpio_reset_pin(out);
-  gpio_set_direction(out, GPIO_MODE_INPUT);
+  gpio_set_direction(out, GPIO_MODE_OUTPUT);
+  gpio_set_level(out, 0);
 
   static bool installed = false;
   if (!installed) {
@@ -287,18 +340,71 @@ void IRAM_ATTR Balboa9800CP::on_clock_edge_() {
   this->disp_bits_[i] = gpio_get_level((gpio_num_t) this->data_gpio_) ? 1 : 0;
   this->ctrl_bits_[i] = gpio_get_level((gpio_num_t) this->ctrl_in_gpio_) ? 1 : 0;
 
+  // Command injection: drive ctrl_out only at bit indices 39-41 (b39,b40,b41).
+  // Outside those indices, keep line low (idle).
+  if (this->ctrl_out_gpio_ >= 0) {
+    int out_level = 0;
+    if (this->pending_frames_left_ > 0 && i >= 39 && i <= 41) {
+      const uint8_t bits = cmd_bits_3(this->pending_cmd_);
+      // Map i=39->MSB (bit2), i=40->bit1, i=41->LSB (bit0)
+      const uint8_t shift = (uint8_t) (41 - i);
+      out_level = (bits >> shift) & 0x01;
+    }
+    gpio_set_level((gpio_num_t) this->ctrl_out_gpio_, out_level);
+  }
+
   this->bit_index_++;
 
   if (this->bit_index_ >= FRAME_BITS) {
     portENTER_CRITICAL_ISR(&balboa_mux);
     this->frame_ready_ = true;
+    if (this->pending_frames_left_ > 0) {
+      this->pending_frames_left_--;
+      if (this->pending_frames_left_ == 0) {
+        this->pending_cmd_ = CMD_NONE;
+      }
+    }
     portEXIT_CRITICAL_ISR(&balboa_mux);
   }
 }
 
 void Balboa9800CP::queue_command(uint8_t cmd) {
-  (void) cmd;
-  // Injection disabled for now (next step).
+  if (cmd == CMD_NONE) return;
+
+  // Arm injection for N full frames.
+  portENTER_CRITICAL(&balboa_mux);
+  this->pending_cmd_ = cmd;
+  this->pending_frames_left_ = this->press_frames_;
+  portEXIT_CRITICAL(&balboa_mux);
+
+  const uint32_t now_ms = millis();
+  this->last_cmd_ms_ = now_ms;
+  if (cmd == CMD_TEMP_UP || cmd == CMD_TEMP_DOWN) {
+    this->last_temp_cmd_ms_ = now_ms;
+  }
+
+  // Ensure sampling is enabled immediately so we can inject on upcoming clock edges.
+  if (!capture_enabled && this->clk_gpio_ >= 0) {
+    capture_enabled = true;
+    gpio_intr_enable((gpio_num_t) this->clk_gpio_);
+  }
+}
+
+void Balboa9800CP::request_setpoint_(int target_f) {
+  // Begin a sync/adjust cycle using the "first press enters setpoint menu" behavior.
+  if (target_f < 80) target_f = 80;
+  if (target_f > 104) target_f = 104;
+
+  this->target_setpoint_f_ = target_f;
+  this->setpoint_sync_active_ = true;
+  this->awaiting_setpoint_read_ = true;
+  this->pending_adjust_presses_ = 0;
+  this->next_adjust_ms_ = 0;
+
+  // Enter setpoint menu without changing value (first press).
+  this->queue_command(CMD_TEMP_UP);
+
+  // Don't immediately change the number entity; we'll validate by reading the displayed setpoint.
 }
 
 void Balboa9800CP::loop() {
@@ -330,7 +436,11 @@ void Balboa9800CP::loop() {
     done = this->frame_ready_;
     portEXIT_CRITICAL(&balboa_mux);
 
-    if (done || (now - capture_start_ms) > CAPTURE_TIMEOUT_MS) {
+    const bool command_active =
+        (this->pending_frames_left_ > 0) || (this->pending_cmd_ != CMD_NONE) ||
+        this->setpoint_sync_active_ || this->awaiting_setpoint_read_ || (this->pending_adjust_presses_ != 0);
+
+    if ((done || (now - capture_start_ms) > CAPTURE_TIMEOUT_MS) && !command_active) {
       gpio_intr_disable((gpio_num_t) this->clk_gpio_);
       capture_enabled = false;
       next_sample_ms = now + SAMPLE_INTERVAL_MS;
@@ -390,14 +500,74 @@ void Balboa9800CP::loop() {
   }
 
   // Publish temp only when numeric; otherwise keep last
-  if (this->water_temp_ != nullptr) {
-    int temp_f = 0;
-    if (parse_reasonable_temp_f(disp, temp_f)) {
-      last_temp_f_ = (float) temp_f;
+  // Temperature handling:
+  // - Normal case: publish water temperature to HA.
+  // - Immediately after temp up/down activity, the topside briefly shows SETPOINT.
+  //   We capture that separately and do NOT publish it as water temperature.
+  const uint32_t setpoint_window_ms = 6000;  // conservative window for setpoint display after a temp button press
+
+  int parsed_temp_f = 0;
+  const bool have_temp = parse_reasonable_temp_f(disp, parsed_temp_f);
+
+  const bool in_setpoint_window =
+      (this->last_temp_cmd_ms_ != 0U) && ((now - this->last_temp_cmd_ms_) <= setpoint_window_ms);
+
+  if (have_temp && in_setpoint_window) {
+    // Treat display as SETPOINT (momentary set-temp menu).
+    this->current_setpoint_f_ = parsed_temp_f;
+    this->current_setpoint_valid_ = (parsed_temp_f >= 80 && parsed_temp_f <= 104);
+
+    if (this->setpoint_number_ != nullptr && this->current_setpoint_valid_) {
+      this->setpoint_number_->publish_state((float) this->current_setpoint_f_);
+    }
+  } else if (this->water_temp_ != nullptr) {
+    if (have_temp) {
+      last_temp_f_ = (float) parsed_temp_f;
       have_last_temp_ = true;
       this->water_temp_->publish_state(last_temp_f_);
     } else {
       // keep last known temp in HA
+    }
+  }
+
+
+  // -----------------------------------------------------------------------
+  // Setpoint sync/adjust state machine:
+  // 1) request_setpoint_() presses TEMP_UP once to enter setpoint menu (no change).
+  // 2) We read the momentary setpoint display and compute delta.
+  // 3) We issue the needed TEMP_UP/DOWN presses to reach target.
+  // -----------------------------------------------------------------------
+  if (this->setpoint_sync_active_) {
+    // Once we have a valid setpoint readout, compute remaining presses.
+    if (this->awaiting_setpoint_read_ && this->current_setpoint_valid_) {
+      this->awaiting_setpoint_read_ = false;
+
+      const int delta = this->target_setpoint_f_ - this->current_setpoint_f_;
+      this->pending_adjust_presses_ = delta;
+
+      // Small delay before starting adjustments so the menu is stable.
+      this->next_adjust_ms_ = now + 400;
+      ESP_LOGI(TAG, "Setpoint sync: current=%dF target=%dF delta=%d",
+               this->current_setpoint_f_, this->target_setpoint_f_, delta);
+    }
+
+    // Issue step presses at a controlled rate.
+    if (!this->awaiting_setpoint_read_ && this->pending_adjust_presses_ != 0 && now >= this->next_adjust_ms_) {
+      if (this->pending_adjust_presses_ > 0) {
+        this->queue_command(CMD_TEMP_UP);
+        this->pending_adjust_presses_--;
+      } else {
+        this->queue_command(CMD_TEMP_DOWN);
+        this->pending_adjust_presses_++;
+      }
+      this->next_adjust_ms_ = now + 450;
+    }
+
+    // Done when no remaining presses and we're not waiting on read.
+    if (!this->awaiting_setpoint_read_ && this->pending_adjust_presses_ == 0) {
+      // We'll leave setpoint_number_ at last observed value; the topside may keep showing setpoint briefly.
+      this->setpoint_sync_active_ = false;
+      ESP_LOGI(TAG, "Setpoint sync complete (target %dF).", this->target_setpoint_f_);
     }
   }
 
@@ -416,6 +586,11 @@ void Balboa9800CP::loop() {
   if (this->pump_ != nullptr) this->pump_->publish_state(pump1_on);
   if (this->jets_ != nullptr) this->jets_->publish_state(pump2_on);
   if (this->blower_ != nullptr) this->blower_->publish_state(blower_on);
+
+  // NEW: Switch entities mirror the same state bits (36/37/38)
+  if (this->pump1_switch_ != nullptr) this->pump1_switch_->publish_state(pump1_on);
+  if (this->pump2_switch_ != nullptr) this->pump2_switch_->publish_state(pump2_on);
+  if (this->blower_switch_ != nullptr) this->blower_switch_->publish_state(blower_on);
   if (this->light_ != nullptr) this->light_->publish_state(false);
 
   // Keep other binary sensors publishing “unknown/false” until we map them:

@@ -67,3 +67,25 @@ button:
       name: "Spa Temp Down"
     mode:
       name: "Spa Mode"
+
+# --- NEW: Replace Pump1/Pump2/Blower buttons with toggles ---
+switch:
+  - platform: balboa_9800cp
+    balboa_id: spa
+    pump1:
+      name: "Spa Pump 1"
+    pump2:
+      name: "Spa Pump 2"
+    blower:
+      name: "Spa Air Blower"
+
+# --- NEW: Set temperature control/validation (reads setpoint menu frames) ---
+number:
+  - platform: balboa_9800cp
+    balboa_id: spa
+    setpoint:
+      name: "Spa Set Temperature"
+      min_value: 80
+      max_value: 104
+      step: 1
+      mode: box
