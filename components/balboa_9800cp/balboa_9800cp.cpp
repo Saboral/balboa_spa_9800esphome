@@ -342,8 +342,8 @@ void IRAM_ATTR Balboa9800CP::on_clock_edge_() {
   // Line is open-drain; '1' releases (idle/high), '0' pulls low.
   if (this->ctrl_out_gpio_ >= 0) {
     int out_level = 1;  // idle = released/high
-    if (this->pending_frames_left_ > 0 && i >= 39 && i <= 41) {
-      const uint8_t bits = cmd_bits_3(this->pending_cmd_);
+    if (this->press_active_ && i >= 39 && i <= 41) {
+      const uint8_t bits = cmd_bits_3(this->active_cmd_);
       // Map i=39->MSB (bit2), i=40->bit1, i=41->LSB (bit0)
       const uint8_t shift = (uint8_t) (41 - i);
       out_level = (bits >> shift) & 0x01;
@@ -360,37 +360,20 @@ void IRAM_ATTR Balboa9800CP::on_clock_edge_() {
   if (this->bit_index_ >= FRAME_BITS) {
     portENTER_CRITICAL_ISR(&balboa_mux);
     this->frame_ready_ = true;
-    if (this->pending_frames_left_ > 0) {
-      this->pending_frames_left_--;
-      if (this->pending_frames_left_ == 0) {
-        this->pending_cmd_ = CMD_NONE;
+    if (this->press_active_) {
+      if (this->active_frames_left_ > 0) {
+        this->active_frames_left_--;
+      }
+      if (this->active_frames_left_ == 0) {
+        this->press_active_ = false;
+        this->active_cmd_ = CMD_NONE;
+        this->press_finished_ = true;
       }
     }
     portEXIT_CRITICAL_ISR(&balboa_mux);
   }
 }
 
-void Balboa9800CP::queue_command(uint8_t cmd) {
-  if (cmd == CMD_NONE) return;
-
-  // Arm injection for N full frames.
-  portENTER_CRITICAL(&balboa_mux);
-  this->pending_cmd_ = cmd;
-  this->pending_frames_left_ = this->press_frames_;
-  portEXIT_CRITICAL(&balboa_mux);
-
-  const uint32_t now_ms = millis();
-  this->last_cmd_ms_ = now_ms;
-  if (cmd == CMD_TEMP_UP || cmd == CMD_TEMP_DOWN) {
-    this->last_temp_cmd_ms_ = now_ms;
-  }
-
-  // Ensure sampling is enabled immediately so we can inject on upcoming clock edges.
-  if (!capture_enabled && this->clk_gpio_ >= 0) {
-    capture_enabled = true;
-    gpio_intr_enable((gpio_num_t) this->clk_gpio_);
-  }
-}
 
 void Balboa9800CP::request_setpoint_(int target_f) {
   // Begin a sync/adjust cycle using the "first press enters setpoint menu" behavior.
@@ -411,6 +394,9 @@ void Balboa9800CP::request_setpoint_(int target_f) {
 
 void Balboa9800CP::loop() {
   const uint32_t now = millis();
+
+  // Service queued commands (enforces inter-press delay)
+  this->service_command_queue_();
 
   // -----------------------------------------------------------------------
   // Intermittent sampling scheduler:
@@ -439,7 +425,7 @@ void Balboa9800CP::loop() {
     portEXIT_CRITICAL(&balboa_mux);
 
     const bool command_active =
-        (this->pending_frames_left_ > 0) || (this->pending_cmd_ != CMD_NONE) ||
+        (this->press_active_) || (!this->queue_empty_()) ||
         this->setpoint_sync_active_ || this->awaiting_setpoint_read_ || (this->pending_adjust_presses_ != 0);
 
     if ((done || (now - capture_start_ms) > CAPTURE_TIMEOUT_MS) && !command_active) {
@@ -548,7 +534,7 @@ void Balboa9800CP::loop() {
       this->pending_adjust_presses_ = delta;
 
       // Small delay before starting adjustments so the menu is stable.
-      this->next_adjust_ms_ = now + 400;
+      this->next_adjust_ms_ = now + 50;
       ESP_LOGI(TAG, "Setpoint sync: current=%dF target=%dF delta=%d",
                this->current_setpoint_f_, this->target_setpoint_f_, delta);
     }
@@ -562,7 +548,7 @@ void Balboa9800CP::loop() {
         this->queue_command(CMD_TEMP_DOWN);
         this->pending_adjust_presses_++;
       }
-      this->next_adjust_ms_ = now + 450;
+      this->next_adjust_ms_ = now + 50;
     }
 
     // Done when no remaining presses and we're not waiting on read.
@@ -647,6 +633,76 @@ void Balboa9800CP::loop() {
              bits7(d1).c_str(), bits7(d2).c_str(), bits7(d3).c_str(), bits7(d4).c_str(),
              bits7(stat).c_str(), bits7(eq).c_str(), disp.c_str(), (int) pump1_on);
   }
+}
+
+
+// ---------------- Command queue + timing ----------------
+bool Balboa9800CP::queue_empty_() const {
+  return this->cmd_q_head_ == this->cmd_q_tail_;
+}
+
+bool Balboa9800CP::queue_full_() const {
+  return (uint8_t) ((this->cmd_q_tail_ + 1U) % CMD_QUEUE_SIZE) == this->cmd_q_head_;
+}
+
+bool Balboa9800CP::queue_push_(uint8_t cmd) {
+  if (this->queue_full_()) return false;
+  this->cmd_queue_[this->cmd_q_tail_] = cmd;
+  this->cmd_q_tail_ = (uint8_t) ((this->cmd_q_tail_ + 1U) % CMD_QUEUE_SIZE);
+  return true;
+}
+
+bool Balboa9800CP::queue_pop_(uint8_t &cmd) {
+  if (this->queue_empty_()) return false;
+  cmd = this->cmd_queue_[this->cmd_q_head_];
+  this->cmd_q_head_ = (uint8_t) ((this->cmd_q_head_ + 1U) % CMD_QUEUE_SIZE);
+  return true;
+}
+
+void Balboa9800CP::enqueue_command(uint8_t cmd) {
+  if (cmd == CMD_NONE) return;
+
+  if (!this->queue_push_(cmd)) {
+    ESP_LOGW(TAG, "Command queue full; dropping cmd=%u", cmd);
+    return;
+  }
+
+  const uint32_t now_ms = millis();
+  if (cmd == CMD_TEMP_UP || cmd == CMD_TEMP_DOWN) {
+    this->last_temp_cmd_ms_ = now_ms;
+  }
+
+  // Ensure sampling is enabled so ISR runs and can inject commands.
+  if (!capture_enabled && this->clk_gpio_ >= 0) {
+    capture_enabled = true;
+    gpio_intr_enable((gpio_num_t) this->clk_gpio_);
+  }
+}
+
+void Balboa9800CP::start_press_(uint8_t cmd) {
+  this->active_cmd_ = cmd;
+  this->active_frames_left_ = this->press_frames_;
+  this->press_active_ = true;
+}
+
+void Balboa9800CP::service_command_queue_() {
+  // If ISR marked a press finished, timestamp it here (never call millis() in ISR).
+  if (this->press_finished_) {
+    this->press_finished_ = false;
+    this->last_press_end_ms_ = millis();
+  }
+
+  if (this->press_active_) return;
+
+  if (this->last_press_end_ms_ != 0U) {
+    const uint32_t since = millis() - this->last_press_end_ms_;
+    if (since < INTER_PRESS_DELAY_MS) return;
+  }
+
+  uint8_t cmd;
+  if (!this->queue_pop_(cmd)) return;
+
+  this->start_press_(cmd);
 }
 
 void Balboa9800CP::process_frame_() {

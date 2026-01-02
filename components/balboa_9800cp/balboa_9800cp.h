@@ -99,8 +99,9 @@ class Balboa9800CP : public Component {
   void setup() override;
   void loop() override;
   void dump_config() override;
-
-  void queue_command(uint8_t cmd);
+  void enqueue_command(uint8_t cmd);
+  // Back-compat (buttons call this)
+  void queue_command(uint8_t cmd) { this->enqueue_command(cmd); }
 
   // NEW: Setpoint control request (invoked by BalboaSetpointNumber)
   void request_setpoint_(int target_f);
@@ -162,11 +163,33 @@ class Balboa9800CP : public Component {
   switch_::Switch *blower_switch_{nullptr};
   number::Number *setpoint_number_{nullptr};
 
-  // ---- NEW: command injection state ----
-  volatile uint8_t pending_cmd_{0};
-  volatile uint8_t pending_frames_left_{0};
-  uint32_t last_cmd_ms_{0};
+  // ===== Command queue + inter-press timing =====
+  static constexpr uint32_t INTER_PRESS_DELAY_MS = 500;
+  static constexpr uint8_t CMD_QUEUE_SIZE = 32;
+
+  uint8_t cmd_queue_[CMD_QUEUE_SIZE]{};
+  volatile uint8_t cmd_q_head_{0};
+  volatile uint8_t cmd_q_tail_{0};
+
+  // Active press state (used by ISR)
+  volatile bool press_active_{false};
+  volatile uint8_t active_cmd_{0};
+  volatile uint8_t active_frames_left_{0};
+  volatile bool press_finished_{false};
+
+  uint32_t last_press_end_ms_{0};
+
+  // Timestamp used to suppress publishing setpoint as water temperature
   uint32_t last_temp_cmd_ms_{0};
+
+  // queue helpers
+  bool queue_empty_() const;
+  bool queue_full_() const;
+  bool queue_push_(uint8_t cmd);
+  bool queue_pop_(uint8_t &cmd);
+
+  void start_press_(uint8_t cmd);
+  void service_command_queue_();
 
   // ---- NEW: setpoint sync/adjust state ----
   bool setpoint_sync_active_{false};
