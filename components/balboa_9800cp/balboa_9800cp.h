@@ -21,6 +21,7 @@ class BalboaButton : public button::Button {
  public:
   void set_parent(Balboa9800CP *parent) { parent_ = parent; }
   void set_cmd(uint8_t cmd) { cmd_ = cmd; }
+  void set_command(uint8_t cmd) { this->set_cmd(cmd); }  // compat
 
  protected:
   void press_action() override;
@@ -33,6 +34,33 @@ class Balboa9800CP : public Component {
  public:
   // --- Wiring ---
   void set_pins(GPIOPin *clk, GPIOPin *data, GPIOPin *ctrl_in, GPIOPin *ctrl_out);
+
+  // Raw GPIO numbers used by ISR-safe gpio_get_level() and gpio_set_level()
+  void set_gpio_numbers(int clk_gpio, int data_gpio, int ctrl_in_gpio, int ctrl_out_gpio) {
+    this->clk_gpio_ = clk_gpio;
+    this->data_gpio_ = data_gpio;
+    this->ctrl_in_gpio_ = ctrl_in_gpio;
+    this->ctrl_out_gpio_ = ctrl_out_gpio;
+  }
+
+  // Timing parameters
+  void set_gap_us(uint32_t gap_us) { this->gap_us_ = gap_us; }
+  void set_press_frames(uint8_t press_frames) { this->press_frames_ = press_frames; }
+
+  // Backward-compatible setter name used by some codegen
+  void set_display_text_sensor(text_sensor::TextSensor *t) { this->set_display_text(t); }
+
+  // Optional per-sensor setters (used by binary_sensor.py)
+  void set_inverted_sensor(binary_sensor::BinarySensor *s) { inverted_ = s; }
+  void set_set_heat_sensor(binary_sensor::BinarySensor *s) { set_heat_ = s; }
+  void set_mode_standard_sensor(binary_sensor::BinarySensor *s) { mode_standard_ = s; }
+  void set_heating_sensor(binary_sensor::BinarySensor *s) { heating_ = s; }
+  void set_temp_up_display_sensor(binary_sensor::BinarySensor *s) { temp_up_display_ = s; }
+  void set_temp_down_display_sensor(binary_sensor::BinarySensor *s) { temp_down_display_ = s; }
+  void set_blower_sensor(binary_sensor::BinarySensor *s) { blower_ = s; }
+  void set_pump_sensor(binary_sensor::BinarySensor *s) { pump_ = s; }
+  void set_jets_sensor(binary_sensor::BinarySensor *s) { jets_ = s; }
+  void set_light_sensor(binary_sensor::BinarySensor *s) { light_ = s; }
 
   // --- Existing entities (your project already uses these setters in codegen) ---
   void set_water_temp_sensor(sensor::Sensor *s) { water_temp_ = s; }

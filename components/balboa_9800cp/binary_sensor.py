@@ -1,17 +1,16 @@
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome.components import binary_sensor
+from esphome.const import CONF_ID
 
-from . import Balboa9800CP
-
-CONF_BALBOA_ID = "balboa_id"
+from . import Balboa9800CP, CONF_BALBOA_ID
 
 CONF_INVERTED = "inverted"
 CONF_SET_HEAT = "set_heat"
 CONF_MODE_STANDARD = "mode_standard"
 CONF_HEATING = "heating"
-CONF_TEMP_UP = "temp_up_display"
-CONF_TEMP_DOWN = "temp_down_display"
+CONF_TEMP_UP_DISPLAY = "temp_up_display"
+CONF_TEMP_DOWN_DISPLAY = "temp_down_display"
 CONF_BLOWER = "blower"
 CONF_PUMP = "pump"
 CONF_JETS = "jets"
@@ -24,8 +23,8 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_SET_HEAT): binary_sensor.binary_sensor_schema(),
         cv.Optional(CONF_MODE_STANDARD): binary_sensor.binary_sensor_schema(),
         cv.Optional(CONF_HEATING): binary_sensor.binary_sensor_schema(),
-        cv.Optional(CONF_TEMP_UP): binary_sensor.binary_sensor_schema(),
-        cv.Optional(CONF_TEMP_DOWN): binary_sensor.binary_sensor_schema(),
+        cv.Optional(CONF_TEMP_UP_DISPLAY): binary_sensor.binary_sensor_schema(),
+        cv.Optional(CONF_TEMP_DOWN_DISPLAY): binary_sensor.binary_sensor_schema(),
         cv.Optional(CONF_BLOWER): binary_sensor.binary_sensor_schema(),
         cv.Optional(CONF_PUMP): binary_sensor.binary_sensor_schema(),
         cv.Optional(CONF_JETS): binary_sensor.binary_sensor_schema(),
@@ -52,12 +51,12 @@ async def to_code(config):
         s = await binary_sensor.new_binary_sensor(config[CONF_HEATING])
         cg.add(parent.set_heating_sensor(s))
 
-    if CONF_TEMP_UP in config:
-        s = await binary_sensor.new_binary_sensor(config[CONF_TEMP_UP])
+    if CONF_TEMP_UP_DISPLAY in config:
+        s = await binary_sensor.new_binary_sensor(config[CONF_TEMP_UP_DISPLAY])
         cg.add(parent.set_temp_up_display_sensor(s))
 
-    if CONF_TEMP_DOWN in config:
-        s = await binary_sensor.new_binary_sensor(config[CONF_TEMP_DOWN])
+    if CONF_TEMP_DOWN_DISPLAY in config:
+        s = await binary_sensor.new_binary_sensor(config[CONF_TEMP_DOWN_DISPLAY])
         cg.add(parent.set_temp_down_display_sensor(s))
 
     if CONF_BLOWER in config:
