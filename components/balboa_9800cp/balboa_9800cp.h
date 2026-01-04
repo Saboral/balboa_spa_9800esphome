@@ -53,7 +53,7 @@ class Balboa9800CP : public Component {
 
   void setup() override;
   void loop() override;
-  void dump_config() override {}
+  void dump_config() override;
 
   // Singleton used by ISR router
   static Balboa9800CP *instance_;
@@ -87,7 +87,7 @@ class Balboa9800CP : public Component {
 
   // ===== ISR capture =====
   static void IRAM_ATTR isr_router_();
-  void IRAM_ATTR on_clock_edge_();
+  void on_clock_edge_();
 
   // Capture config/state
   GPIOPin *clk_{nullptr};
