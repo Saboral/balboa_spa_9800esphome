@@ -211,8 +211,8 @@ void Balboa9800CP::setup() {
   gpio_reset_pin(clk);
   gpio_set_direction(clk, GPIO_MODE_INPUT);
 
-  // ✅ CRITICAL: rising edge only (one sample per clock pulse)
-  gpio_set_intr_type(clk, GPIO_INTR_POSEDGE);
+  // ✅ GS510SZ/Balboa_GS_Interface style: interrupt on both edges
+  gpio_set_intr_type(clk, GPIO_INTR_ANYEDGE);
 
   gpio_reset_pin(disp);
   gpio_set_direction(disp, GPIO_MODE_INPUT);
@@ -220,9 +220,10 @@ void Balboa9800CP::setup() {
   gpio_reset_pin(ctrl);
   gpio_set_direction(ctrl, GPIO_MODE_INPUT);
 
-  // Keep ctrl_out high-Z for now (button injection later)
+  // ctrl_out drives the isolated injector stage
   gpio_reset_pin(out);
-  gpio_set_direction(out, GPIO_MODE_INPUT);
+  gpio_set_direction(out, GPIO_MODE_OUTPUT);
+  gpio_set_level(out, 0);
 
   static bool installed = false;
   if (!installed) {
@@ -264,45 +265,145 @@ void IRAM_ATTR Balboa9800CP::isr_router_() {
 }
 
 void IRAM_ATTR Balboa9800CP::on_clock_edge_() {
-  if (!capture_enabled) return;
+  // Mirror Balboa_GS_Interface.cpp behavior:
+  // - ISR runs on both edges (ANYEDGE)
+  // - When CLK is LOW: keep ctrl_out LOW (idle)
+  // - When CLK is HIGH: drive command bits (39..41) and sample inputs; increment bit counter on HIGH phase only
+
   this->isr_edge_count_++;
 
   const uint32_t now = micros();
   const uint32_t dt = now - this->last_edge_us_;
   this->last_edge_us_ = now;
 
-  // Resync on long idle gap: start a new frame
+  // Resync on long idle gap
   if (dt > this->gap_us_) {
     this->bit_index_ = 0;
-    this->frame_ready_ = false;  // ensure capture resumes
+    this->frame_ready_ = false;
   }
 
-  // Frame-freeze guard: don’t overwrite until next resync gap
-  if (this->frame_ready_) return;
+  // If we already have a complete frame waiting, do not overwrite until resync gap
+  if (this->frame_ready_)
+    return;
 
+  const gpio_num_t clk = (gpio_num_t) this->clk_gpio_;
+  const gpio_num_t out = (gpio_num_t) this->ctrl_out_gpio_;
+
+  // Determine current CLK level (we're in ANYEDGE ISR)
+  const int clk_level = gpio_get_level(clk);
+
+  if (clk_level == 0) {
+    // Clock low phase: keep output low (idle)
+    gpio_set_level(out, 0);
+    return;
+  }
+
+  // Clock high phase: this is when the reference implementation drives/samples.
   const int i = this->bit_index_;
-  if (i < 0 || i >= FRAME_BITS) return;
+  if (i < 0 || i >= 42)
+    return;
 
-  // Sample both lines on same rising edge
+  // Drive ctrl_out only during command window when a press is active.
+  // Outside the window, keep it LOW.
+  if (this->press_active_ && i >= 39 && i <= 41) {
+    const bool level = this->command_bit_level_(this->active_cmd_, i);
+    gpio_set_level(out, level ? 1 : 0);
+  } else {
+    gpio_set_level(out, 0);
+  }
+
+  // Sample inputs on the high phase (matching Balboa_GS_Interface.cpp)
   this->disp_bits_[i] = gpio_get_level((gpio_num_t) this->data_gpio_) ? 1 : 0;
   this->ctrl_bits_[i] = gpio_get_level((gpio_num_t) this->ctrl_in_gpio_) ? 1 : 0;
 
   this->bit_index_++;
 
-  if (this->bit_index_ >= FRAME_BITS) {
+  if (this->bit_index_ >= 42) {
     portENTER_CRITICAL_ISR(&balboa_mux);
     this->frame_ready_ = true;
     portEXIT_CRITICAL_ISR(&balboa_mux);
+
+    // One "press" consumes whole frames. Decrement when a frame completes.
+    if (this->press_active_) {
+      if (this->active_press_frames_left_ > 0)
+        this->active_press_frames_left_--;
+      if (this->active_press_frames_left_ == 0) {
+        this->press_active_ = false;
+        this->press_ended_flag_ = true;
+      }
+    }
   }
 }
 
+bool Balboa9800CP::q_push_(uint8_t cmd) {
+  if (this->q_full_()) return false;
+  this->cmd_q_[this->q_tail_] = cmd;
+  this->q_tail_ = (uint8_t) ((this->q_tail_ + 1) % CMD_Q_SIZE);
+  return true;
+}
+
+bool Balboa9800CP::q_pop_(uint8_t &cmd) {
+  if (this->q_empty_()) return false;
+  cmd = this->cmd_q_[this->q_head_];
+  this->q_head_ = (uint8_t) ((this->q_head_ + 1) % CMD_Q_SIZE);
+  return true;
+}
+
+void Balboa9800CP::start_press_(uint8_t cmd) {
+  this->active_cmd_ = cmd;
+  this->active_press_frames_left_ = this->press_frames_;
+  this->press_active_ = true;
+}
+
+// Mapping derived from Balboa_GS_Interface.cpp: bits 39..41 = 3-bit command.
+bool Balboa9800CP::command_bit_level_(uint8_t cmd, int bit_index) const {
+  // bit_index is 39, 40, or 41
+  // Return true=HIGH, false=LOW
+  // Commands: 1=MODE(001),2=TEMPUP(100),3=TEMPDOWN(101),4=LIGHT(011),5=PUMP1(110),6=PUMP2(010),7=BLOWER(111)
+  switch (cmd) {
+    case 1: // MODE 001
+      return (bit_index == 41);
+    case 2: // TEMP UP 100
+      return (bit_index == 39);
+    case 3: // TEMP DOWN 101
+      return (bit_index == 39 || bit_index == 41);
+    case 4: // LIGHT 011
+      return (bit_index == 40 || bit_index == 41);
+    case 5: // PUMP1 110
+      return (bit_index == 39 || bit_index == 40);
+    case 6: // PUMP2 010
+      return (bit_index == 40);
+    case 7: // BLOWER 111
+      return true;
+    default:
+      return false;
+  }
+}
+
+void Balboa9800CP::service_queue_() {
+  if (this->press_ended_flag_) {
+    this->press_ended_flag_ = false;
+    this->last_press_end_ms_ = millis();
+  }
+
+  if (this->press_active_) return;
+
+  if (this->last_press_end_ms_ != 0 && (millis() - this->last_press_end_ms_) < INTER_PRESS_DELAY_MS) return;
+
+  uint8_t cmd;
+  if (!this->q_pop_(cmd)) return;
+  this->start_press_(cmd);
+}
+
 void Balboa9800CP::queue_command(uint8_t cmd) {
-  (void) cmd;
-  // Injection disabled for now (next step).
+  if (!this->q_push_(cmd)) {
+    ESP_LOGW(TAG, "Command queue full; dropping cmd=%u", cmd);
+  }
 }
 
 void Balboa9800CP::loop() {
   const uint32_t now = millis();
+  this->service_queue_();
 
   // -----------------------------------------------------------------------
   // Intermittent sampling scheduler:
