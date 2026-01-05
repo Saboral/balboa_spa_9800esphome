@@ -292,28 +292,28 @@ void IRAM_ATTR Balboa9800CP::on_clock_edge_() {
   // Determine current CLK level (we're in ANYEDGE ISR)
   const int clk_level = gpio_get_level(clk);
 
+  // Phase-correct command injection:
+  // Prepare ctrl_out during the CLK LOW phase so it is stable before the spa samples on the next HIGH phase.
   if (clk_level == 0) {
-    // Clock low phase: keep output low (idle)
-    gpio_set_level(out, 0);
+    const int next_i = this->bit_index_;
+    const int cmd_start = 39 + this->command_offset_;
+    const int cmd_end = cmd_start + 2;
+
+    if (this->press_active_ && next_i >= cmd_start && next_i <= cmd_end) {
+      const bool level = this->command_bit_level_(this->active_cmd_, next_i);
+      gpio_set_level(out, level ? 1 : 0);
+    } else {
+      gpio_set_level(out, 0);
+    }
     return;
   }
 
-  // Clock high phase: this is when the reference implementation drives/samples.
+  // Clock HIGH phase: sample inputs and advance bit counter.
   const int i = this->bit_index_;
   if (i < 0 || i >= 42)
     return;
 
-  // Drive ctrl_out only during command window when a press is active.
-  // Outside the window, keep it LOW.
-  const int cmd_start = 39 + (int) this->command_offset_;
-  const int cmd_end   = cmd_start + 2;
-
-  if (this->press_active_ && i >= cmd_start && i <= cmd_end) {
-    const bool level = this->command_bit_level_(this->active_cmd_, i);
-    gpio_set_level(out, level ? 1 : 0);
-  } else {
-    gpio_set_level(out, 0);
-  }
+  // ctrl_out was already prepared during CLK LOW phase above (phase-correct).
 
   // Sample inputs on the high phase (matching Balboa_GS_Interface.cpp)
   this->disp_bits_[i] = gpio_get_level((gpio_num_t) this->data_gpio_) ? 1 : 0;
@@ -360,9 +360,8 @@ void Balboa9800CP::start_press_(uint8_t cmd) {
 
 // Mapping derived from Balboa_GS_Interface.cpp: bits 39..41 = 3-bit command.
 bool Balboa9800CP::command_bit_level_(uint8_t cmd, int bit_index) const {
-  // bit_index is expected to be within the 3-bit command window.
-  // The nominal window is bits 39..41, but may be shifted by command_offset_.
-  const int b0 = 39 + (int) this->command_offset_;
+  // Command bits are sent in a 3-bit window starting at (39 + command_offset_).
+  const int b0 = 39 + this->command_offset_;
   const int b1 = b0 + 1;
   const int b2 = b0 + 2;
 
@@ -377,9 +376,9 @@ bool Balboa9800CP::command_bit_level_(uint8_t cmd, int bit_index) const {
       return (bit_index == b0 || bit_index == b2);
     case 4: // LIGHT 011
       return (bit_index == b1 || bit_index == b2);
-    case 5: // PUMP 1 110
+    case 5: // PUMP1 110
       return (bit_index == b0 || bit_index == b1);
-    case 6: // PUMP 2 010
+    case 6: // PUMP2 010
       return (bit_index == b1);
     case 7: // BLOWER 111
       return true;
