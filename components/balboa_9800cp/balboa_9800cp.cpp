@@ -305,7 +305,10 @@ void IRAM_ATTR Balboa9800CP::on_clock_edge_() {
 
   // Drive ctrl_out only during command window when a press is active.
   // Outside the window, keep it LOW.
-  if (this->press_active_ && i >= 39 && i <= 41) {
+  const int cmd_start = 39 + (int) this->command_offset_;
+  const int cmd_end   = cmd_start + 2;
+
+  if (this->press_active_ && i >= cmd_start && i <= cmd_end) {
     const bool level = this->command_bit_level_(this->active_cmd_, i);
     gpio_set_level(out, level ? 1 : 0);
   } else {
@@ -357,22 +360,27 @@ void Balboa9800CP::start_press_(uint8_t cmd) {
 
 // Mapping derived from Balboa_GS_Interface.cpp: bits 39..41 = 3-bit command.
 bool Balboa9800CP::command_bit_level_(uint8_t cmd, int bit_index) const {
-  // bit_index is 39, 40, or 41
+  // bit_index is expected to be within the 3-bit command window.
+  // The nominal window is bits 39..41, but may be shifted by command_offset_.
+  const int b0 = 39 + (int) this->command_offset_;
+  const int b1 = b0 + 1;
+  const int b2 = b0 + 2;
+
   // Return true=HIGH, false=LOW
   // Commands: 1=MODE(001),2=TEMPUP(100),3=TEMPDOWN(101),4=LIGHT(011),5=PUMP1(110),6=PUMP2(010),7=BLOWER(111)
   switch (cmd) {
     case 1: // MODE 001
-      return (bit_index == 41);
+      return (bit_index == b2);
     case 2: // TEMP UP 100
-      return (bit_index == 39);
+      return (bit_index == b0);
     case 3: // TEMP DOWN 101
-      return (bit_index == 39 || bit_index == 41);
+      return (bit_index == b0 || bit_index == b2);
     case 4: // LIGHT 011
-      return (bit_index == 40 || bit_index == 41);
-    case 5: // PUMP1 110
-      return (bit_index == 39 || bit_index == 40);
-    case 6: // PUMP2 010
-      return (bit_index == 40);
+      return (bit_index == b1 || bit_index == b2);
+    case 5: // PUMP 1 110
+      return (bit_index == b0 || bit_index == b1);
+    case 6: // PUMP 2 010
+      return (bit_index == b1);
     case 7: // BLOWER 111
       return true;
     default:

@@ -18,6 +18,7 @@ CONF_CTRL_OUT_PIN = "ctrl_out_pin"
 
 CONF_GAP_US = "gap_us"
 CONF_PRESS_FRAMES = "press_frames"
+CONF_COMMAND_OFFSET = "command_offset"
 
 CONFIG_SCHEMA = cv.Schema(
     {
@@ -28,6 +29,7 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Required(CONF_CTRL_OUT_PIN): pins.gpio_output_pin_schema,
         cv.Optional(CONF_GAP_US, default=1500): cv.positive_int,
         cv.Optional(CONF_PRESS_FRAMES, default=2): cv.int_range(min=1, max=20),
+        cv.Optional(CONF_COMMAND_OFFSET, default=0): cv.int_range(min=-3, max=3),
     }
 ).extend(cv.COMPONENT_SCHEMA)
 
@@ -54,3 +56,4 @@ async def to_code(config):
 
     cg.add(var.set_gap_us(config[CONF_GAP_US]))
     cg.add(var.set_press_frames(config[CONF_PRESS_FRAMES]))
+    cg.add(var.set_command_offset(config[CONF_COMMAND_OFFSET]))

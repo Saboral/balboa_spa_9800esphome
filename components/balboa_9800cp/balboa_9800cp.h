@@ -46,6 +46,7 @@ class Balboa9800CP : public Component {
   // Timing parameters
   void set_gap_us(uint32_t gap_us) { this->gap_us_ = gap_us; }
   void set_press_frames(uint8_t press_frames) { this->press_frames_ = press_frames; }
+  void set_command_offset(int8_t off) { command_offset_ = off; }
 
   // Backward-compatible setter name used by some codegen
   void set_display_text_sensor(text_sensor::TextSensor *t) { this->set_display_text(t); }
@@ -92,6 +93,7 @@ class Balboa9800CP : public Component {
   static constexpr uint8_t CMD_Q_SIZE = 16;
 
   uint8_t cmd_q_[CMD_Q_SIZE]{};
+  int8_t command_offset_{0};
   volatile uint8_t q_head_{0};
   volatile uint8_t q_tail_{0};
 
