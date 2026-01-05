@@ -397,7 +397,8 @@ bool Balboa9800CP::command_bit_level_(uint8_t cmd, int bit_index) const {
   }
 }
 
-\1  // Wait for at least one full "release" frame after a press ends.
+void Balboa9800CP::service_queue_() {
+  // Wait for at least one full "release" frame after a press ends.
   if (this->press_ended_flag_) {
     this->press_ended_flag_ = false;
     this->last_press_end_ms_ = millis();
