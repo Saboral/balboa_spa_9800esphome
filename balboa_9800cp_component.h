@@ -15,7 +15,7 @@
 
 namespace balboa_9800cp {
 
-class Balboa9800CPComponent : public Component {
+class Balboa9800CPComponent : public esphome::public Component {
  public:
   void set_clock_pin(GPIOPin *pin) { this->clock_pin_ = pin; }
   void set_read_pin(GPIOPin *pin) { this->read_pin_ = pin; }

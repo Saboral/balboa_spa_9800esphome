@@ -3,7 +3,7 @@ import esphome.config_validation as cv
 from esphome import pins
 
 DOMAIN = "balboa_9800cp"
-balboa_ns = cg.global_ns.namespace("balboa_9800cp")  # <-- IMPORTANT
+balboa_ns = cg.global_ns.namespace("balboa_9800cp")
 
 Balboa9800CPComponent = balboa_ns.class_("Balboa9800CPComponent", cg.Component)
 
@@ -16,7 +16,11 @@ CONFIG_SCHEMA = cv.Schema(
     }
 ).extend(cv.COMPONENT_SCHEMA)
 
+
 async def to_code(config):
+    # IMPORTANT: ensure the generated main.cpp can see our class declarations
+    cg.add_global(cg.RawStatement('#include "balboa_9800cp_component.h"'))
+
     var = cg.new_Pvariable(config[cv.GenerateID()])
     await cg.register_component(var, config)
 
