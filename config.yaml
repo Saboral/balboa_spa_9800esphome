@@ -1,62 +1,83 @@
 esphome:
-  name: spa-9800cp-esp32
-
-esp32:
+  name: spa-9800cp
+  platform: ESP32
   board: esp32dev
-  framework:
-    type: arduino
+
+external_components:
+  - source:
+      type: https://github.com/Saboral/balboa_spa_9800esphome/
+      path: ./external_components
 
 logger:
   level: DEBUG
+  
+api:
+
+ota:
+  - platform: esphome
 
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
 
-api:
-
-ota:
-  - platform: esphome
-    
-external_components:
-  - source:
-      type: git
-      url: https://github.com/Saboral/balboa_spa_9800esphome/
-      ref: d83dc52ba4b6accb795185166591548e2b820445
-    components: [ balboa_9800cp ]
-
+# Core component (pins must match your wiring)
 balboa_9800cp:
   id: spa
-  clk_pin: 18
-  data_pin: 19
-  ctrl_in_pin: 21
-  ctrl_out_pin: 22
-  gap_us: 10000
-  press_frames: 6
+  clock_pin: 18
+  read_pin: 19
+  write_pin: 22
 
 sensor:
   - platform: balboa_9800cp
     balboa_id: spa
-    water_temp_f:
+    water_temperature:
       name: "Spa Water Temperature"
+    set_temperature:
+      name: "Spa Set Temperature"
 
 text_sensor:
   - platform: balboa_9800cp
     balboa_id: spa
-    display:
-      name: "Spa Display"
+    lcd_display:
+      name: "Spa LCD Display"
 
 binary_sensor:
   - platform: balboa_9800cp
     balboa_id: spa
-    heating:
-      name: "Spa Heating"
-    pump:
-      name: "Spa Pump 1"
-    jets:
-      name: "Spa Pump 2"
+    display_button:
+      name: "Spa Display Button Pressed"
+    display_bit29:
+      name: "Spa Display Bit29"
+    display_bit30:
+      name: "Spa Display Bit30"
+    display_standard_mode:
+      name: "Spa Standard Mode"
+    display_bit32:
+      name: "Spa Display Bit32"
+    display_bit33:
+      name: "Spa Display Bit33"
+    display_bit34:
+      name: "Spa Display Bit34"
+    display_heater:
+      name: "Spa Heater Running"
+    display_pump1:
+      name: "Spa Pump 1 Running"
+    display_pump2:
+      name: "Spa Pump 2 Running"
+    display_air_blower:
+      name: "Spa Air Blower Running"
+    display_data_buffer_overflow:
+      name: "Spa Display Buffer Overflow"
+
+switch:
+  - platform: balboa_9800cp
+    balboa_id: spa
     blower:
-      name: "Spa Air Blower"
+      name: "Spa Blower"
+    pump1:
+      name: "Spa Pump 1"
+    pump2:
+      name: "Spa Pump 2"
 
 button:
   - platform: balboa_9800cp
@@ -65,5 +86,12 @@ button:
       name: "Spa Temp Up"
     temp_down:
       name: "Spa Temp Down"
-    mode:
-      name: "Spa Mode"
+
+number:
+  - platform: balboa_9800cp
+    balboa_id: spa
+    target_temperature:
+      name: "Spa Target Temperature"
+      min_value: 80
+      max_value: 104
+      step: 1

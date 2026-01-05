@@ -1,23 +1,39 @@
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome.components import sensor
-from esphome.const import CONF_ID
+from esphome.const import UNIT_DEGREE_FAHRENHEIT, DEVICE_CLASS_TEMPERATURE, STATE_CLASS_MEASUREMENT
 
-from . import Balboa9800CP, CONF_BALBOA_ID
+from . import DOMAIN, Balboa9800CPComponent
 
-CONF_WATER_TEMP = "water_temp"
+CONF_BALBOA_ID = "balboa_id"
+CONF_WATER_TEMPERATURE = "water_temperature"
+CONF_SET_TEMPERATURE = "set_temperature"
 
 CONFIG_SCHEMA = cv.Schema(
     {
-        cv.GenerateID(CONF_BALBOA_ID): cv.use_id(Balboa9800CP),
-        cv.Required(CONF_WATER_TEMP): sensor.sensor_schema(
-            unit_of_measurement="°F",
-            accuracy_decimals=0,
+        cv.GenerateID(CONF_BALBOA_ID): cv.use_id(Balboa9800CPComponent),
+        cv.Optional(CONF_WATER_TEMPERATURE): sensor.sensor_schema(
+            unit_of_measurement=UNIT_DEGREE_FAHRENHEIT,
+            accuracy_decimals=1,
+            device_class=DEVICE_CLASS_TEMPERATURE,
+            state_class=STATE_CLASS_MEASUREMENT,
+        ),
+        cv.Optional(CONF_SET_TEMPERATURE): sensor.sensor_schema(
+            unit_of_measurement=UNIT_DEGREE_FAHRENHEIT,
+            accuracy_decimals=1,
+            device_class=DEVICE_CLASS_TEMPERATURE,
+            state_class=STATE_CLASS_MEASUREMENT,
         ),
     }
 )
 
 async def to_code(config):
     parent = await cg.get_variable(config[CONF_BALBOA_ID])
-    s = await sensor.new_sensor(config[CONF_WATER_TEMP])
-    cg.add(parent.set_water_temp_sensor(s))
+
+    if CONF_WATER_TEMPERATURE in config:
+        s = await sensor.new_sensor(config[CONF_WATER_TEMPERATURE])
+        cg.add(parent.set_water_temperature_sensor(s))
+
+    if CONF_SET_TEMPERATURE in config:
+        s = await sensor.new_sensor(config[CONF_SET_TEMPERATURE])
+        cg.add(parent.set_set_temperature_sensor(s))
