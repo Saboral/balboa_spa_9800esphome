@@ -2,7 +2,7 @@ import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome.components import button
 
-from . import balboa_ns, Balboa9800CPComponent
+from . import Balboa9800CPComponent, balboa_ns
 
 CONF_BALBOA_ID = "balboa_id"
 CONF_TEMP_UP = "temp_up"
@@ -25,6 +25,7 @@ async def to_code(config):
         b = await button.new_button(config[CONF_TEMP_UP])
         cg.add(b.set_parent(parent))
         cg.add(b.set_direction(1))  # up
+
     if CONF_TEMP_DOWN in config:
         b = await button.new_button(config[CONF_TEMP_DOWN])
         cg.add(b.set_parent(parent))

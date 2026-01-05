@@ -3,7 +3,7 @@ import esphome.config_validation as cv
 from esphome.components import number
 from esphome.const import DEVICE_CLASS_TEMPERATURE
 
-from . import balboa_ns, Balboa9800CPComponent
+from . import Balboa9800CPComponent, balboa_ns
 
 CONF_BALBOA_ID = "balboa_id"
 CONF_TARGET_TEMPERATURE = "target_temperature"

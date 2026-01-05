@@ -3,6 +3,9 @@ import esphome.config_validation as cv
 from esphome import pins
 
 DOMAIN = "balboa_9800cp"
+
+# Your unified header defines wrapper classes in the *global* C++ namespace:
+#   namespace balboa_9800cp { class Balboa9800CPComponent ... }
 balboa_ns = cg.global_ns.namespace("balboa_9800cp")
 
 Balboa9800CPComponent = balboa_ns.class_("Balboa9800CPComponent", cg.Component)
@@ -18,8 +21,11 @@ CONFIG_SCHEMA = cv.Schema(
 
 
 async def to_code(config):
-    # IMPORTANT: ensure the generated main.cpp can see our class declarations
-    cg.add_global(cg.RawStatement('#include "esphome/components/balboa_9800cp/balboa_9800cp_component.h"'))
+    # Make sure generated main.cpp sees the class declarations.
+    # (This is important because the wrapper classes are in balboa_9800cp.h.)
+    cg.add_global(
+        cg.RawStatement('#include "esphome/components/balboa_9800cp/balboa_9800cp.h"')
+    )
 
     var = cg.new_Pvariable(config[cv.GenerateID()])
     await cg.register_component(var, config)
@@ -31,3 +37,4 @@ async def to_code(config):
     cg.add(var.set_clock_pin(clock))
     cg.add(var.set_read_pin(read))
     cg.add(var.set_write_pin(write))
+

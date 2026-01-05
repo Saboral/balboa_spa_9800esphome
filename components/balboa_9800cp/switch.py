@@ -2,7 +2,7 @@ import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome.components import switch
 
-from . import balboa_ns, Balboa9800CPComponent
+from . import Balboa9800CPComponent, balboa_ns
 
 CONF_BALBOA_ID = "balboa_id"
 
