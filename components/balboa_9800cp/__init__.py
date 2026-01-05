@@ -19,7 +19,7 @@ CONFIG_SCHEMA = cv.Schema(
 
 async def to_code(config):
     # IMPORTANT: ensure the generated main.cpp can see our class declarations
-    cg.add_global(cg.RawStatement('#include "balboa_9800cp_component.h"'))
+    cg.add_global(cg.RawStatement('#include "esphome/components/balboa_9800cp/balboa_9800cp_component.h"'))
 
     var = cg.new_Pvariable(config[cv.GenerateID()])
     await cg.register_component(var, config)
