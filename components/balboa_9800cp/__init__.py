@@ -3,7 +3,7 @@ import esphome.config_validation as cv
 from esphome import pins
 
 DOMAIN = "balboa_9800cp"
-balboa_ns = cg.esphome_ns.namespace("balboa_9800cp")
+balboa_ns = cg.global_ns.namespace("balboa_9800cp")  # <-- IMPORTANT
 
 Balboa9800CPComponent = balboa_ns.class_("Balboa9800CPComponent", cg.Component)
 
@@ -15,7 +15,6 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Required("write_pin"): pins.internal_gpio_output_pin_schema,
     }
 ).extend(cv.COMPONENT_SCHEMA)
-
 
 async def to_code(config):
     var = cg.new_Pvariable(config[cv.GenerateID()])

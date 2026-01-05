@@ -13,7 +13,6 @@
 #include "balboa_9800cp.h"
 #include "platform_entities.h"
 
-namespace esphome {
 namespace balboa_9800cp {
 
 class Balboa9800CPComponent : public Component {
@@ -119,4 +118,3 @@ class Balboa9800CPComponent : public Component {
 };
 
 }  // namespace balboa_9800cp
-}  // namespace esphome
