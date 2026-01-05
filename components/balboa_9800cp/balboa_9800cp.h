@@ -40,7 +40,7 @@ class BalboaInterface {
 	bool displayHeater;        						// Heater running or not
 	bool displayPump1;        						// Pump 1 running or not 
 	bool displayPump2;        						// Pump 2 running or not
-	bool displayAirBlower;        			  // Hot Blower running or not
+	bool displayBlower;        			  // Hot Tub Blower running or not
 	static bool displayDataBufferOverflow;
 	
 	// Write button data to control unit  
