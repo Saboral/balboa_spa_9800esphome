@@ -342,7 +342,7 @@ void IRAM_ATTR Balboa9800CP::on_clock_edge_() {
         this->press_active_ = false;
         this->press_ended_flag_ = true;
         // Force at least one full frame of no-command before allowing another press.
-        g_release_frames_left = 1;
+        g_release_frames_left = 2;
       }
     }
   }
