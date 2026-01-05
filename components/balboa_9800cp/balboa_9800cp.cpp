@@ -14,6 +14,11 @@ static const char *const TAG = "balboa_9800cp";
 // Force at least one full frame of "no command" after a press ends (helps avoid double-latching)
 static volatile uint8_t g_release_frames_left = 0;
 
+// Arm commands so presses only start on a frame boundary (prevents partial 3-bit patterns -> Pump2 glitches)
+static volatile bool g_start_armed = false;
+static volatile uint8_t g_armed_cmd = 0;
+static volatile uint8_t g_armed_frames = 0;
+
 Balboa9800CP *Balboa9800CP::instance_ = nullptr;
 static portMUX_TYPE balboa_mux = portMUX_INITIALIZER_UNLOCKED;
 
@@ -38,6 +43,8 @@ static float last_temp_f_ = NAN;
 // -----------------------------------------------------------------------
 // Intermittent sampling control (reduce ISR/CPU load)
 // Capture one frame, then disable clock interrupts until next interval.
+// NOTE: For control responsiveness, we keep ISR enabled whenever a command
+// is queued/armed/active, even if sampling would otherwise disable it.
 // -----------------------------------------------------------------------
 static constexpr uint32_t SAMPLE_INTERVAL_MS = 2000;  // adjust (e.g., 2000–5000ms)
 static constexpr uint32_t CAPTURE_TIMEOUT_MS  = 200;  // safety timeout for one frame
@@ -189,6 +196,7 @@ void Balboa9800CP::dump_config() {
   ESP_LOGCONFIG(TAG, "  ctrl_out_gpio: %d", this->ctrl_out_gpio_);
   ESP_LOGCONFIG(TAG, "  gap_us: %u", (unsigned) this->gap_us_);
   ESP_LOGCONFIG(TAG, "  press_frames: %u", (unsigned) this->press_frames_);
+  ESP_LOGCONFIG(TAG, "  command_offset: %d", (int) this->command_offset_);
 }
 
 void Balboa9800CP::setup() {
@@ -254,10 +262,13 @@ void Balboa9800CP::setup() {
   have_last_temp_ = false;
   last_temp_f_ = NAN;
 
-  ESP_LOGI(TAG, "ISR attached (POSEDGE). clk=%d disp=%d ctrl_in=%d ctrl_out=%d",
+  g_release_frames_left = 0;
+  g_start_armed = false;
+
+  ESP_LOGI(TAG, "ISR attached (ANYEDGE). clk=%d disp=%d ctrl_in=%d ctrl_out=%d",
            this->clk_gpio_, this->data_gpio_, this->ctrl_in_gpio_, this->ctrl_out_gpio_);
 
-  // Start with clock interrupt disabled; loop() will enable during sampling windows
+  // Start with clock interrupt disabled; loop() will enable during sampling windows OR while commands are pending.
   gpio_intr_disable(clk);
   capture_enabled = false;
 }
@@ -270,8 +281,8 @@ void IRAM_ATTR Balboa9800CP::isr_router_() {
 void IRAM_ATTR Balboa9800CP::on_clock_edge_() {
   // Mirror Balboa_GS_Interface.cpp behavior:
   // - ISR runs on both edges (ANYEDGE)
-  // - When CLK is LOW: keep ctrl_out LOW (idle)
-  // - When CLK is HIGH: drive command bits (39..41) and sample inputs; increment bit counter on HIGH phase only
+  // - When CLK is LOW: prepare ctrl_out for the upcoming HIGH phase
+  // - When CLK is HIGH: sample inputs; increment bit counter on HIGH phase only
 
   this->isr_edge_count_++;
 
@@ -295,9 +306,19 @@ void IRAM_ATTR Balboa9800CP::on_clock_edge_() {
   // Determine current CLK level (we're in ANYEDGE ISR)
   const int clk_level = gpio_get_level(clk);
 
-  // Phase-correct command injection:
-  // Prepare ctrl_out during the CLK LOW phase so it is stable before the spa samples on the next HIGH phase.
   if (clk_level == 0) {
+    // ---- Frame-synced press start ----
+    // If a command is armed and we're at the start of a frame (bit_index_==0),
+    // start the press now so bits 39..41(+offset) will always be hit cleanly.
+    if (!this->press_active_ && g_release_frames_left == 0 && g_start_armed && this->bit_index_ == 0) {
+      this->active_cmd_ = g_armed_cmd;
+      this->active_press_frames_left_ = g_armed_frames;
+      this->press_active_ = true;
+      g_start_armed = false;
+    }
+
+    // Phase-correct command injection:
+    // Prepare ctrl_out during the CLK LOW phase so it is stable before the spa samples on the next HIGH phase.
     const int next_i = this->bit_index_;
     const int cmd_start = 39 + this->command_offset_;
     const int cmd_end = cmd_start + 2;
@@ -315,8 +336,6 @@ void IRAM_ATTR Balboa9800CP::on_clock_edge_() {
   const int i = this->bit_index_;
   if (i < 0 || i >= 42)
     return;
-
-  // ctrl_out was already prepared during CLK LOW phase above (phase-correct).
 
   // Sample inputs on the high phase (matching Balboa_GS_Interface.cpp)
   this->disp_bits_[i] = gpio_get_level((gpio_num_t) this->data_gpio_) ? 1 : 0;
@@ -342,7 +361,7 @@ void IRAM_ATTR Balboa9800CP::on_clock_edge_() {
         this->press_active_ = false;
         this->press_ended_flag_ = true;
         // Force at least one full frame of no-command before allowing another press.
-        g_release_frames_left = 2;
+        g_release_frames_left = 1;
       }
     }
   }
@@ -404,14 +423,20 @@ void Balboa9800CP::service_queue_() {
     this->last_press_end_ms_ = millis();
   }
 
+  // If a press is active or we already armed one, do not pop another.
   if (this->press_active_) return;
   if (g_release_frames_left > 0) return;
+  if (g_start_armed) return;
 
   if (this->last_press_end_ms_ != 0 && (millis() - this->last_press_end_ms_) < INTER_PRESS_DELAY_MS) return;
 
   uint8_t cmd;
   if (!this->q_pop_(cmd)) return;
-  this->start_press_(cmd);
+
+  // Arm it; ISR will start it at the next frame boundary.
+  g_armed_cmd = cmd;
+  g_armed_frames = this->press_frames_;
+  g_start_armed = true;
 }
 
 void Balboa9800CP::queue_command(uint8_t cmd) {
@@ -427,9 +452,12 @@ void Balboa9800CP::loop() {
   // -----------------------------------------------------------------------
   // Intermittent sampling scheduler:
   // Enable clock interrupt briefly to capture one frame, then disable.
+  // BUT: keep ISR enabled whenever a command is queued/armed/active.
   // -----------------------------------------------------------------------
   static uint32_t next_sample_ms = 0;
   static uint32_t capture_start_ms = 0;
+
+  const bool control_pending = this->press_active_ || g_start_armed || !this->q_empty_();
 
   if (!capture_enabled && now >= next_sample_ms) {
     capture_enabled = true;
@@ -444,6 +472,11 @@ void Balboa9800CP::loop() {
     gpio_intr_enable((gpio_num_t) this->clk_gpio_);
   }
 
+  // If we have a control command pending, ensure interrupts are enabled now.
+  if (control_pending) {
+    gpio_intr_enable((gpio_num_t) this->clk_gpio_);
+  }
+
   if (capture_enabled) {
     bool done = false;
     portENTER_CRITICAL(&balboa_mux);
@@ -451,7 +484,10 @@ void Balboa9800CP::loop() {
     portEXIT_CRITICAL(&balboa_mux);
 
     if (done || (now - capture_start_ms) > CAPTURE_TIMEOUT_MS) {
-      gpio_intr_disable((gpio_num_t) this->clk_gpio_);
+      // Only disable interrupts if we are not trying to control the spa.
+      if (!control_pending) {
+        gpio_intr_disable((gpio_num_t) this->clk_gpio_);
+      }
       capture_enabled = false;
       next_sample_ms = now + SAMPLE_INTERVAL_MS;
     }
@@ -496,7 +532,7 @@ void Balboa9800CP::loop() {
   const uint8_t stat = pack7_msb(last_disp_, 28);
   const uint8_t eq   = pack7_msb(last_disp_, 35);
 
-  // Decode display (4 chars) -- keep your established order
+  // Decode display (4 chars)
   std::string disp;
   disp.reserve(4);
   disp.push_back(seg7_to_char(d1));
@@ -538,7 +574,6 @@ void Balboa9800CP::loop() {
   if (this->blower_ != nullptr) this->blower_->publish_state(blower_on);
   if (this->light_ != nullptr) this->light_->publish_state(false);
 
-  // Keep other binary sensors publishing “unknown/false” until we map them:
   if (this->mode_standard_ != nullptr) this->mode_standard_->publish_state(false);
   if (this->temp_up_display_ != nullptr) this->temp_up_display_->publish_state(false);
   if (this->temp_down_display_ != nullptr) this->temp_down_display_->publish_state(false);
@@ -569,7 +604,7 @@ void Balboa9800CP::loop() {
     }
   }
 
-  // Optional: raw frame once/sec (unchanged from your file)
+  // Optional: raw frame once/sec
   static uint32_t last_dbg_ms = 0;
   if (now - last_dbg_ms >= 1000) {
     last_dbg_ms = now;
@@ -598,4 +633,3 @@ void Balboa9800CP::process_frame_() {
 
 }  // namespace balboa_9800cp
 }  // namespace esphome
-//comment to test for OTA upload
