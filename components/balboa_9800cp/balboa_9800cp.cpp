@@ -11,6 +11,9 @@ namespace balboa_9800cp {
 
 static const char *const TAG = "balboa_9800cp";
 
+// Force at least one full frame of "no command" after a press ends (helps avoid double-latching)
+static volatile uint8_t g_release_frames_left = 0;
+
 Balboa9800CP *Balboa9800CP::instance_ = nullptr;
 static portMUX_TYPE balboa_mux = portMUX_INITIALIZER_UNLOCKED;
 
@@ -326,6 +329,11 @@ void IRAM_ATTR Balboa9800CP::on_clock_edge_() {
     this->frame_ready_ = true;
     portEXIT_CRITICAL_ISR(&balboa_mux);
 
+    // Consume one frame of post-press "release" time, if any.
+    if (g_release_frames_left > 0) {
+      g_release_frames_left--;
+    }
+
     // One "press" consumes whole frames. Decrement when a frame completes.
     if (this->press_active_) {
       if (this->active_press_frames_left_ > 0)
@@ -333,6 +341,8 @@ void IRAM_ATTR Balboa9800CP::on_clock_edge_() {
       if (this->active_press_frames_left_ == 0) {
         this->press_active_ = false;
         this->press_ended_flag_ = true;
+        // Force at least one full frame of no-command before allowing another press.
+        g_release_frames_left = 1;
       }
     }
   }
@@ -387,13 +397,14 @@ bool Balboa9800CP::command_bit_level_(uint8_t cmd, int bit_index) const {
   }
 }
 
-void Balboa9800CP::service_queue_() {
+\1  // Wait for at least one full "release" frame after a press ends.
   if (this->press_ended_flag_) {
     this->press_ended_flag_ = false;
     this->last_press_end_ms_ = millis();
   }
 
   if (this->press_active_) return;
+  if (g_release_frames_left > 0) return;
 
   if (this->last_press_end_ms_ != 0 && (millis() - this->last_press_end_ms_) < INTER_PRESS_DELAY_MS) return;
 
