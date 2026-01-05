@@ -13,13 +13,13 @@ CONFIG_SCHEMA = cv.Schema(
     {
         cv.GenerateID(CONF_BALBOA_ID): cv.use_id(Balboa9800CPComponent),
         cv.Optional(CONF_WATER_TEMPERATURE): sensor.sensor_schema(
-            unit_of_measurement=UNIT_F,
+            unit_of_measurement="°F",
             accuracy_decimals=1,
             device_class=DEVICE_CLASS_TEMPERATURE,
             state_class=STATE_CLASS_MEASUREMENT,
         ),
         cv.Optional(CONF_SET_TEMPERATURE): sensor.sensor_schema(
-            unit_of_measurement=UNIT_F,
+            unit_of_measurement="°F",
             accuracy_decimals=1,
             device_class=DEVICE_CLASS_TEMPERATURE,
             state_class=STATE_CLASS_MEASUREMENT,
