@@ -1,7 +1,7 @@
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome.components import number
-from esphome.const import UNIT_DEGREE_FAHRENHEIT, DEVICE_CLASS_TEMPERATURE
+from esphome.const import DEVICE_CLASS_TEMPERATURE
 
 from . import balboa_ns, Balboa9800CPComponent
 
@@ -15,7 +15,7 @@ CONFIG_SCHEMA = cv.Schema(
         cv.GenerateID(CONF_BALBOA_ID): cv.use_id(Balboa9800CPComponent),
         cv.Optional(CONF_TARGET_TEMPERATURE): number.number_schema(
             BalboaTargetTempNumber,
-            unit_of_measurement=UNIT_DEGREE_FAHRENHEIT,
+            unit_of_measurement="°F",
             device_class=DEVICE_CLASS_TEMPERATURE,
         ).extend(
             {
