@@ -103,9 +103,9 @@ namespace balboa_9800cp {
 
 class Balboa9800CPComponent : public esphome::Component {
  public:
-  void set_clock_pin(esphome::GPIOPin *pin) { this->clock_pin_ = pin; }
-  void set_read_pin(esphome::GPIOPin *pin) { this->read_pin_ = pin; }
-  void set_write_pin(esphome::GPIOPin *pin) { this->write_pin_ = pin; }
+  void set_clock_pin(esphome::InternalGPIOPin *pin) { this->clock_pin_ = pin; }
+  void set_read_pin(esphome::InternalGPIOPin *pin) { this->read_pin_ = pin; }
+  void set_write_pin(esphome::InternalGPIOPin *pin) { this->write_pin_ = pin; }
 
   // Status entities
   void set_water_temperature_sensor(esphome::sensor::Sensor *s) { this->water_temperature_sensor_ = s; }
@@ -218,9 +218,9 @@ class Balboa9800CPComponent : public esphome::Component {
   }
 
  protected:
-  esphome::GPIOPin *clock_pin_{nullptr};
-  esphome::GPIOPin *read_pin_{nullptr};
-  esphome::GPIOPin *write_pin_{nullptr};
+  esphome::InternalGPIOPin *clock_pin_{nullptr};
+  esphome::InternalGPIOPin *read_pin_{nullptr};
+  esphome::InternalGPIOPin *write_pin_{nullptr};
 
   BalboaInterface *iface_{nullptr};
 
